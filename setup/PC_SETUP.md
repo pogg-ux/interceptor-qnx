@@ -60,6 +60,7 @@ It's done when you see **`Compilation finished successfully!`** and **`=== Done 
 cd ~/interceptor-qnx/setup
 bash run_all.sh
 ```
+(`bash run_all.sh 2` starts the gen 2 machine with the Panic button.)
 It asks for your Ubuntu password (OpenPLC needs admin rights for port 502), shows `Waiting for the PLC on port 502...`, then the PLC state, starting at `IDLE`.
 
 **Ubuntu window #2** (new PowerShell → `wsl -d Ubuntu-24.04`):
@@ -75,18 +76,63 @@ Window #1 should now show the machine cycling: CLAMP_CLOSE → PRESS_DOWN → DW
 
 ---
 
-## Things to try (window #2)
+## Things to try (window #2, in `~/interceptor-qnx/sim`)
 
+**Running the machine**
 | Type this | What happens |
 |---|---|
-| `python3 simctl.py set ESTOP_A 0` then `set ESTOP_B 0` | E-stop: PLC goes to ESTOP |
-| `python3 simctl.py set ESTOP_A 1` then `set ESTOP_B 1` then `press PB_RESET` | Recovers, re-homes, waits for Start |
-| `python3 simctl.py press PB_START` | Runs auto again |
-| `python3 simctl.py fault F8_eject_dead 1` | Eject cylinder dies → PLC fault 300 after 5 s |
-| `python3 simctl.py fault F8_eject_dead 0` then `press PB_RESET` | Clears it |
-| `python3 simctl.py status` | Shows the machine's physical state |
+| `python3 simctl.py press PB_RESET` | Machine homes, goes to READY |
+| `python3 simctl.py press PB_START` | Auto cycles (~10 s each) |
+| `python3 simctl.py press PB_STOP` | Finishes the current cycle, then READY |
+| `python3 simctl.py set SS_AUTO 0` then `set SS_SEMI 1` | Semi-auto: one cycle per Start |
 
-**OpenPLC's own web page:** open **http://localhost:8080** in your Windows browser. Login **openplc / openplc**. Under **Monitoring** you can watch every I/O point live.
+**Power and safety**
+| Type this | What happens |
+|---|---|
+| `python3 simctl.py estop` | Control power cut: PLC shows `PLC_OFF`, pump stops |
+| `python3 simctl.py twist` | Gen 1 only: releases the latched E-stop |
+| `python3 simctl.py poweron` | Selector OFF → POWER → START: panel power + pump start, then `press PB_RESET` |
+| `python3 simctl.py set GUARD_A 0` | Guard opens: `GUARD_STOP`. Set back to 1, then `press PB_RESET` |
+| `python3 simctl.py panic 1` | Gen 2 only (`bash run_all.sh 2`): hazardous directions cut, pump keeps running |
+| `python3 simctl.py press PB_SAFE_JOG 4` | During Panic: press up + clamp open (safe directions) |
+| `python3 simctl.py panic 0` then `press PB_RESET` | Clears Panic |
+
+**See what the Interceptor will see:** `python3 tap_watch.py` (Ctrl+C to stop)
+
+**Faults** (`python3 simctl.py fault NAME VALUE`; set back to 0 to clear)
+| Fault | Example | What it does |
+|---|---|---|
+| F1 clamp drift | `fault F1_rate 0.01` | Clamp gets 10 ms slower every cycle |
+| F3 lazy guard channel | `fault F3_guard_b_lag 0.6` | Guard channel B lags A by 0.6 s |
+| F4 slow safety relay | `fault F4_sr1_slow 0.18` | Safety contacts open 180 ms late |
+| F5 pump wear | `fault F5_pump_wear 0.5` | Slower, weaker, more current, more vibration |
+| F6 encoder miscount | `fault F6_enc_drop 15` | Encoder loses 15 counts per index |
+| F7 weak heater | `fault F7_heater_weak 0.4` | Heater needs more duty to hold temperature |
+| F8 dead eject | `fault F8_eject_dead 1` | PLC faults 300 after 5 s |
+| F10 coil going open | `fault F10_coil_open 0.3` | Coil current low for the same command |
+| F11 amp max set wrong | `fault F11_amp_max_low 0.35` | Press slower, never reaches full force |
+| F12 amp ramp wrong | `fault F12_amp_ramp_slow 0.8` | Sluggish start to every motion |
+| F13 noisy command | `fault F13_cmd_noise 1.5` | Coil current jitters (bad shield/ground) |
+| F14 amp forgets settings | `fault F14_amp_forgets 1`, then `estop` + `poweron` | Machine runs weaker after a power cycle |
+| F15 split Start wiring | `fault F15_mc_start_open 1` (Manual mode) | PLC sees Start, motion controller doesn't |
+| F16 cylinder seal bypass | `fault F16_seal_bypass 0.3` | Same stroke time, ~45% more oil per stroke |
+| F17 seal-in failure | `fault F17_seal_in_bad 1`, then `estop` + `poweron` | Pump drops when the selector springs back |
+| F18 filter clogging | `fault F18_filter_rate 0.5` | Filter pressure drop climbs every cycle |
+
+**OpenPLC's own web page:** **http://localhost:8080** in your Windows browser (login **openplc / openplc**) → **Monitoring**.
+
+---
+
+## Updating to a new version
+```
+cd ~
+mv interceptor-qnx interceptor-qnx-old
+git clone https://github.com/pogg-ux/interceptor-qnx
+cd ~/interceptor-qnx/setup
+bash configure_gipc.sh
+bash run_all.sh
+```
+(`configure_gipc.sh` must be re-run whenever the PLC program or I/O list changes.)
 
 ---
 
@@ -95,6 +141,7 @@ Window #1 should now show the machine cycling: CLAMP_CLOSE → PRESS_DOWN → DW
 | Program | Where | Port |
 |---|---|---|
 | Field simulator ("the machine") | `~/interceptor-qnx/sim/gipc_sim.py` | Modbus 5021, taps UDP 6000, control UDP 6001 |
+| Tap viewer | `~/interceptor-qnx/sim/tap_watch.py` | listens on UDP 6000 |
 | OpenPLC (the virtual PLC) | `~/OpenPLC_v3` | Modbus 502, web page 8080 |
 | PLC program | `~/interceptor-qnx/plc/gipc_main.st` | (none) |
 

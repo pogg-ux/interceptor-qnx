@@ -25,7 +25,7 @@ port = int(os.environ.get("FIELD_PORT", "5021"))
 c.execute("""INSERT INTO Slave_dev (dev_name,dev_type,slave_id,ip_address,ip_port,
   di_start,di_size,coil_start,coil_size,ir_start,ir_size,
   hr_read_start,hr_read_size,hr_write_start,hr_write_size,pause)
-  VALUES ('GIPC_FIELD','TCP',1,'127.0.0.1',?,0,24,0,15,0,8,0,0,0,3,0)""", (port,))
+  VALUES ('GIPC_FIELD','TCP',1,'127.0.0.1',?,0,30,0,15,0,8,0,0,0,3,0)""", (port,))
 c.execute("UPDATE Settings SET Value='20' WHERE Key='Slave_polling'")
 c.execute("UPDATE Settings SET Value='true' WHERE Key='Start_run_mode'")
 if not c.execute("SELECT 1 FROM Programs WHERE File='gipc_main.st'").fetchone():

@@ -1,7 +1,18 @@
 (* =====================================================================
-   Generic Indexing Press Cell (GIPC) - PLC program
-   Fictional machine for the Interceptor project. Written from scratch.
+   Generic Indexing Press Cell (GIPC) - PLC program, revision 2
+   Fictional heated compression-molding press cell for the Interceptor
+   project. Written from scratch; not modeled on any real product.
    Target: OpenPLC Runtime v3 (IEC 61131-3 Structured Text)
+
+   Division of labor
+     - PLC: reads all field inputs, sequences the machine, monitors the
+       guard safety relay, enables the motion controller.
+     - Motion controller ("stack", in the simulator): owns the 0-10 V
+       command to the proportional amplifier for each press function.
+     - Hardwired (in the simulator): E-stop / master control relay cut
+       control power to the whole panel; the hydraulic pump is started by
+       hand from the Power/Start selector and seals itself in.
+
    Field I/O comes from the simulator as an OpenPLC Modbus slave device:
      discrete inputs -> %IX100.0..   coils -> %QX100.0..
      input registers -> %IW100..     holding registers -> %QW100..
@@ -12,14 +23,14 @@
 PROGRAM gipc_main
   VAR
     (* ---------- Digital inputs ---------- *)
-    SR1_OK          AT %IX100.0 : BOOL;   (* safety relay aux contact *)
-    PB_START        AT %IX100.1 : BOOL;
+    SR1_OK          AT %IX100.0 : BOOL;   (* guard safety relay OK *)
+    PB_START        AT %IX100.1 : BOOL;   (* Cycle Start (also wired to the motion controller) *)
     PB_STOP         AT %IX100.2 : BOOL;   (* NC: TRUE = healthy *)
     PB_RESET        AT %IX100.3 : BOOL;
     SS_AUTO         AT %IX100.4 : BOOL;
     SS_MANUAL       AT %IX100.5 : BOOL;
     PB_JOG_INDEX    AT %IX100.6 : BOOL;
-    PB_JOG_PRESS    AT %IX100.7 : BOOL;
+    PB_SAFE_JOG     AT %IX100.7 : BOOL;   (* safe-direction jog during PANIC *)
     PX_TABLE_HOME   AT %IX101.0 : BOOL;
     PX_PIN_LOCKED   AT %IX101.1 : BOOL;
     LS_CLAMP_OPEN   AT %IX101.2 : BOOL;
@@ -30,19 +41,25 @@ PROGRAM gipc_main
     LS_EJECT_EXT    AT %IX101.7 : BOOL;
     PE_PART_LOAD    AT %IX102.0 : BOOL;
     PE_PART_INFEED  AT %IX102.1 : BOOL;
-    M1_AUX          AT %IX102.2 : BOOL;
+    M1_AUX          AT %IX102.2 : BOOL;   (* hydraulic pump running *)
     PS_AIR_OK       AT %IX102.3 : BOOL;
     TS_OIL_OK       AT %IX102.4 : BOOL;   (* NC *)
     OL_M1_OK        AT %IX102.5 : BOOL;   (* NC *)
     LUBE_LOW        AT %IX102.6 : BOOL;
     VFD_FAULT       AT %IX102.7 : BOOL;
+    SS_SEMI         AT %IX103.0 : BOOL;   (* mode selector: Semi-auto *)
+    PANIC_ACTIVE    AT %IX103.1 : BOOL;   (* gen 2 panic button pressed *)
+    SIM_PLC_POWERED AT %IX103.2 : BOOL;   (* EMULATION ONLY: PLC has control power *)
+    SW_MAN_CLAMP    AT %IX103.3 : BOOL;   (* manual clamp switch (maintained) *)
+    SW_MAN_CONV     AT %IX103.4 : BOOL;   (* manual conveyor switch (maintained) *)
+    MC_READY        AT %IX103.5 : BOOL;   (* motion controller booted and ready *)
 
     (* ---------- Digital outputs ---------- *)
-    Y_CR1_PUMP      AT %QX100.0 : BOOL;
+    Y_MC_ENABLE     AT %QX100.0 : BOOL;   (* enable to motion controller + amplifier *)
     Y_PIN_RETRACT   AT %QX100.1 : BOOL;
     Y_CLAMP_CLOSE   AT %QX100.2 : BOOL;
     Y_CLAMP_OPEN    AT %QX100.3 : BOOL;
-    Y_PRESS_DOWN    AT %QX100.4 : BOOL;
+    Y_PRESS_DOWN    AT %QX100.4 : BOOL;   (* direction valve; the stack sets speed/force *)
     Y_PRESS_UP      AT %QX100.5 : BOOL;
     Y_EJECT_EXT     AT %QX100.6 : BOOL;
     Y_CR2_INDEX     AT %QX100.7 : BOOL;
@@ -66,45 +83,41 @@ PROGRAM gipc_main
 
     (* ---------- Analog outputs ---------- *)
     AO_VFD_SPEED    AT %QW100 : INT;
-    AO_PROP_VALVE   AT %QW101 : INT;
+    AO_SPARE        AT %QW101 : INT;      (* was prop valve; the stack owns it now *)
     AO_HEAT_DUTY    AT %QW102 : INT;      (* 0..1000 = 0..100.0 % *)
 
     (* ---------- HMI <-> PLC memory ---------- *)
-    HMI_CMD         AT %MW0  : WORD;      (* b0 start b1 stop b2 reset b3 jog index b4 jog press *)
-    SP_PRESS_PSI    AT %MW1  : INT;
+    HMI_CMD         AT %MW0  : WORD;      (* b0 start b1 stop b2 reset b3 jog index *)
     SP_DWELL_MS     AT %MW2  : INT;
     SP_PLATEN_C     AT %MW3  : INT;
     ST_STATE        AT %MW10 : INT;
     ST_FAULT        AT %MW11 : INT;
     ST_CYCLES       AT %MW12 : INT;
     ST_CYCLE_MS     AT %MW13 : INT;
-
   END_VAR
 
   VAR
-    (* ---------- Internal ---------- *)
-    state           : INT := 0;
+    state           : INT := 1;
     fault_code      : INT := 0;
-    first_scan      : BOOL := TRUE;
     manual_index    : BOOL := FALSE;
+    semi_cycle      : BOOL := FALSE;
+    stop_req        : BOOL := FALSE;   (* Stop pressed: finish this cycle, then READY *)
     cmd_start       : BOOL;
     cmd_stop        : BOOL;
     cmd_reset       : BOOL;
     cmd_jog_index   : BOOL;
-    cmd_jog_press   : BOOL;
     start_edge      : R_TRIG;
     reset_edge      : R_TRIG;
     jog_index_edge  : R_TRIG;
     step_timer      : TON;     (* per-step watchdog, coarse on purpose *)
     dwell_timer     : TON;
-    pump_timer      : TON;
     cycle_timer     : TON;
     flash_timer     : TON;
     flash           : BOOL;
     prev_state      : INT := -1;
     enc_start       : INT;
     enc_moved       : INT;
-    platen_c        : INT;     (* whole degC *)
+    platen_c        : INT;
     heat_err        : INT;
     heat_duty       : INT;
     lube_cycles     : INT;
@@ -112,12 +125,29 @@ PROGRAM gipc_main
     cycles          : INT;
   END_VAR
 
-  (* ================= Defaults ================= *)
-  IF first_scan THEN
-    IF SP_PRESS_PSI <= 0 THEN SP_PRESS_PSI := 1800; END_IF;
-    IF SP_DWELL_MS  <= 0 THEN SP_DWELL_MS  := 3000; END_IF;
-    IF SP_PLATEN_C  <= 0 THEN SP_PLATEN_C  := 180;  END_IF;
-    first_scan := FALSE;
+  IF NOT SIM_PLC_POWERED THEN
+    (* ===== PLC has no power (E-stop / control power off) =====
+       Emulates a dead PLC: everything off, and the next power-up is a
+       cold boot into IDLE. *)
+    state := 1;
+    fault_code := 0;
+    manual_index := FALSE;
+    semi_cycle := FALSE;
+    Y_MC_ENABLE := FALSE; Y_PIN_RETRACT := FALSE; Y_CLAMP_CLOSE := FALSE;
+    Y_CLAMP_OPEN := FALSE; Y_PRESS_DOWN := FALSE; Y_PRESS_UP := FALSE;
+    Y_EJECT_EXT := FALSE; Y_CR2_INDEX := FALSE; LT_RUN := FALSE;
+    LT_FAULT := FALSE; LT_READY := FALSE; HORN := FALSE; Y_LUBE := FALSE;
+    Y_VFD_RUN := FALSE; Y_CR3_HEAT := FALSE;
+    AO_VFD_SPEED := 0; AO_SPARE := 0; AO_HEAT_DUTY := 0;
+    ST_STATE := 1;
+    ST_FAULT := 0;
+  ELSE
+
+  (* ================= Cold boot ================= *)
+  IF state = 1 THEN
+    IF SP_DWELL_MS <= 0 THEN SP_DWELL_MS := 3000; END_IF;
+    IF SP_PLATEN_C <= 0 THEN SP_PLATEN_C := 180;  END_IF;
+    state := 0;
   END_IF;
 
   (* ================= Commands (panel OR HMI) ================= *)
@@ -125,26 +155,27 @@ PROGRAM gipc_main
   cmd_stop      := (NOT PB_STOP) OR ((HMI_CMD AND 16#0002) <> 16#0000);
   cmd_reset     := PB_RESET     OR ((HMI_CMD AND 16#0004) <> 16#0000);
   cmd_jog_index := PB_JOG_INDEX OR ((HMI_CMD AND 16#0008) <> 16#0000);
-  cmd_jog_press := PB_JOG_PRESS OR ((HMI_CMD AND 16#0010) <> 16#0000);
 
+  IF cmd_stop AND (state >= 110) AND (state <= 210) THEN stop_req := TRUE; END_IF;
   start_edge(CLK := cmd_start);
   reset_edge(CLK := cmd_reset);
   jog_index_edge(CLK := cmd_jog_index);
 
-  (* Flasher, 0.5 s *)
   flash_timer(IN := NOT flash_timer.Q, PT := T#500ms);
   IF flash_timer.Q THEN flash := NOT flash; END_IF;
 
-  (* ================= Safety: any time SR1 drops ================= *)
-  IF (NOT SR1_OK) AND (state <> 0) THEN
-    state := 999;
+  (* ================= Safety / power conditions, any time ================= *)
+  IF (state >= 10) AND (state < 900) AND NOT SR1_OK THEN
+    state := 999;                                  (* guard opened *)
+  ELSIF (state >= 30) AND (state < 900) AND (state <> 800) AND PANIC_ACTIVE THEN
+    state := 800;                                  (* panic: hazardous directions are cut *)
+  ELSIF (state >= 30) AND (state < 800) AND NOT M1_AUX THEN
+    fault_code := 2; state := 900;                 (* pump stopped unexpectedly *)
   END_IF;
 
-  (* Restart step watchdog whenever the state changes *)
   step_timer(IN := (state = prev_state), PT := T#5s);
   prev_state := state;
 
-  (* All motion outputs off by default; each state turns on what it needs *)
   Y_PIN_RETRACT := FALSE;
   Y_CLAMP_CLOSE := FALSE;
   Y_CLAMP_OPEN  := FALSE;
@@ -152,28 +183,24 @@ PROGRAM gipc_main
   Y_PRESS_UP    := FALSE;
   Y_EJECT_EXT   := FALSE;
   Y_CR2_INDEX   := FALSE;
-  AO_PROP_VALVE := 0;
   HORN          := FALSE;
 
   (* ================= Sequence ================= *)
   CASE state OF
 
-    0: (* IDLE *)
-      Y_CR1_PUMP := FALSE;
-      IF SR1_OK AND cmd_reset THEN state := 10; END_IF;
+    0: (* IDLE: powered, waiting for pump + reset *)
+      IF M1_AUX AND SR1_OK AND cmd_reset THEN state := 10; END_IF;
 
     10: (* SAFETY_CHECK *)
       IF NOT PS_AIR_OK THEN fault_code := 3; state := 900;
       ELSIF NOT TS_OIL_OK THEN fault_code := 4; state := 900;
       ELSIF NOT OL_M1_OK THEN fault_code := 5; state := 900;
-      ELSE state := 20;
+      ELSIF NOT M1_AUX THEN state := 20;
+      ELSE state := 30;
       END_IF;
 
-    20: (* HYD_START *)
-      Y_CR1_PUMP := TRUE;
-      IF M1_AUX THEN state := 30;
-      ELSIF pump_timer.Q THEN fault_code := 1; state := 900;
-      END_IF;
+    20: (* WAIT_PUMP: pump is started by hand at the Power/Start selector *)
+      IF M1_AUX THEN state := 30; END_IF;
 
     30: (* HOMING: press up, clamp open, eject back, pin locked *)
       Y_PRESS_UP := NOT LS_PRESS_UP;
@@ -184,31 +211,35 @@ PROGRAM gipc_main
       END_IF;
 
     40: (* READY *)
-      IF SS_AUTO AND start_edge.Q THEN state := 110; cycle_timer(IN := FALSE);
+      stop_req := FALSE;
+      IF (SS_AUTO OR SS_SEMI) AND start_edge.Q THEN
+        semi_cycle := SS_SEMI;
+        state := 110;
       ELSIF SS_MANUAL THEN state := 50;
       END_IF;
 
-    50: (* MANUAL *)
-      IF cmd_jog_press AND LS_CLAMP_CLOSED THEN
-        Y_PRESS_DOWN := NOT LS_PRESS_DOWN;
-        AO_PROP_VALVE := DINT_TO_INT(INT_TO_DINT(SP_PRESS_PSI) * 32000 / 3000);
-      ELSIF cmd_jog_press THEN
-        Y_CLAMP_CLOSE := NOT LS_CLAMP_CLOSED;
+    50: (* MANUAL: Cycle Start held = press stroke (the stack also needs Start) *)
+      IF cmd_start AND LS_CLAMP_CLOSED THEN
+        Y_PRESS_DOWN := TRUE;
       ELSE
         Y_PRESS_UP := NOT LS_PRESS_UP;
-        IF LS_PRESS_UP THEN Y_CLAMP_OPEN := NOT LS_CLAMP_OPEN; END_IF;
+      END_IF;
+      IF LS_PRESS_UP THEN
+        IF SW_MAN_CLAMP THEN Y_CLAMP_CLOSE := NOT LS_CLAMP_CLOSED;
+        ELSE Y_CLAMP_OPEN := NOT LS_CLAMP_OPEN;
+        END_IF;
+      ELSIF SW_MAN_CLAMP THEN
+        Y_CLAMP_CLOSE := FALSE;   (* hold clamp while the press is down *)
       END_IF;
       IF jog_index_edge.Q AND LS_PRESS_UP AND LS_CLAMP_OPEN THEN
         manual_index := TRUE; state := 170;
-      ELSIF SS_AUTO AND start_edge.Q AND LS_PRESS_UP AND LS_CLAMP_OPEN THEN
-        state := 110;
-      ELSIF NOT SS_MANUAL AND NOT SS_AUTO THEN
+      ELSIF NOT SS_MANUAL AND LS_PRESS_UP AND LS_CLAMP_OPEN THEN
         state := 40;
       END_IF;
 
     110: (* WAIT_PART *)
-      IF cmd_stop THEN state := 40;
-      ELSIF PE_PART_LOAD THEN state := 120; cycle_timer(IN := FALSE);
+      IF stop_req THEN state := 40;
+      ELSIF PE_PART_LOAD THEN state := 120;
       END_IF;
 
     120: (* CLAMP_CLOSE *)
@@ -217,16 +248,14 @@ PROGRAM gipc_main
       ELSIF step_timer.Q THEN fault_code := 220; state := 900;
       END_IF;
 
-    130: (* PRESS_DOWN *)
+    130: (* PRESS_DOWN: direction valve on; the stack ramps its command *)
       Y_PRESS_DOWN := TRUE;
-      AO_PROP_VALVE := DINT_TO_INT(INT_TO_DINT(SP_PRESS_PSI) * 32000 / 3000);
       IF LS_PRESS_DOWN THEN state := 140;
       ELSIF step_timer.Q THEN fault_code := 230; state := 900;
       END_IF;
 
-    140: (* DWELL: hold pressure, platen must be within 10 degC *)
+    140: (* DWELL: the stack switches to its hold command *)
       Y_PRESS_DOWN := TRUE;
-      AO_PROP_VALVE := DINT_TO_INT(INT_TO_DINT(SP_PRESS_PSI) * 32000 / 3000);
       IF dwell_timer.Q THEN state := 150; END_IF;
 
     150: (* PRESS_UP *)
@@ -274,30 +303,43 @@ PROGRAM gipc_main
         cycles := cycles + 1;
         lube_cycles := lube_cycles + 1;
         ST_CYCLE_MS := REAL_TO_INT(TIME_TO_REAL(cycle_timer.ET) * 1000.0);
-        IF cmd_stop OR NOT SS_AUTO THEN state := 40; ELSE state := 110; END_IF;
+        IF stop_req OR semi_cycle OR NOT SS_AUTO THEN
+          semi_cycle := FALSE; state := 40;
+        ELSE
+          state := 110;
+        END_IF;
       ELSIF step_timer.Q THEN fault_code := 310; state := 900;
+      END_IF;
+
+    800: (* PANIC (gen 2): hazardous directions are cut in hardware.
+            PB_SAFE_JOG held = safe-direction release: press up, then clamp open. *)
+      IF PB_SAFE_JOG THEN
+        Y_PRESS_UP := NOT LS_PRESS_UP;
+        IF LS_PRESS_UP THEN Y_CLAMP_OPEN := NOT LS_CLAMP_OPEN; END_IF;
+      END_IF;
+      IF NOT PANIC_ACTIVE AND cmd_reset THEN
+        fault_code := 0; manual_index := FALSE; semi_cycle := FALSE; state := 30;
       END_IF;
 
     900: (* FAULT: motion off, pump stays on *)
       HORN := flash;
-      IF reset_edge.Q THEN fault_code := 0; manual_index := FALSE; state := 10; END_IF;
+      IF reset_edge.Q THEN fault_code := 0; manual_index := FALSE; semi_cycle := FALSE; state := 10; END_IF;
 
-    999: (* E-STOP *)
-      Y_CR1_PUMP := FALSE;
-      (* SR1 re-arms on the same reset press, so accept the held button *)
-      IF SR1_OK AND cmd_reset THEN fault_code := 0; manual_index := FALSE; state := 10; END_IF;
+    999: (* GUARD STOP: guard safety relay dropped *)
+      IF SR1_OK AND cmd_reset THEN fault_code := 0; manual_index := FALSE; semi_cycle := FALSE; state := 10; END_IF;
 
   END_CASE;
 
   (* ================= Timers that depend on state ================= *)
-  pump_timer(IN := (state = 20), PT := T#2s);
   dwell_timer(IN := (state = 140), PT := REAL_TO_TIME(INT_TO_REAL(SP_DWELL_MS) / 1000.0));
   cycle_timer(IN := (state >= 120) AND (state <= 210), PT := T#60s);
 
+  (* Motion controller enable: whenever the machine may move hydraulically *)
+  Y_MC_ENABLE := (state >= 30) AND (state < 900) AND MC_READY AND M1_AUX;
+
   (* ================= Background: platen heater ================= *)
-  (* Simple proportional duty: 4% per degC of error, clamped 0..100% *)
   platen_c := AI_PLATEN_TEMP / 10;
-  Y_CR3_HEAT := (state >= 20) AND (state < 900) AND TS_OIL_OK;
+  Y_CR3_HEAT := (state >= 10) AND (state < 900) AND TS_OIL_OK;
   IF Y_CR3_HEAT THEN
     heat_err := SP_PLATEN_C - platen_c;
     heat_duty := heat_err * 40 + 350;
@@ -307,6 +349,7 @@ PROGRAM gipc_main
     heat_duty := 0;
   END_IF;
   AO_HEAT_DUTY := heat_duty;
+  AO_SPARE := 0;
 
   (* ================= Background: lube pulse every 60 cycles ================= *)
   lube_timer(IN := Y_LUBE, PT := T#3s);
@@ -314,16 +357,18 @@ PROGRAM gipc_main
   IF lube_timer.Q THEN Y_LUBE := FALSE; END_IF;
 
   (* ================= Background: conveyor ================= *)
-  Y_VFD_RUN := (state >= 110) AND (state < 900);
+  Y_VFD_RUN := (state >= 110) AND (state < 800);
   IF Y_VFD_RUN THEN AO_VFD_SPEED := 16000; ELSE AO_VFD_SPEED := 0; END_IF;
 
   (* ================= Pilot lights + status ================= *)
-  LT_RUN   := (state >= 110) AND (state < 900);
+  LT_RUN   := (state >= 110) AND (state < 800);
   LT_READY := ((state = 40) OR (state = 50)) OR ((state = 0) AND flash);
-  LT_FAULT := (state >= 900) AND flash;
+  LT_FAULT := (state >= 800) AND flash;
   ST_STATE := state;
   ST_FAULT := fault_code;
   ST_CYCLES := cycles;
+
+  END_IF;
 END_PROGRAM
 
 

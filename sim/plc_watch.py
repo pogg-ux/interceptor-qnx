@@ -12,11 +12,11 @@ import time
 
 from modbus_tcp import ModbusTCPClient
 
-STATE_NAMES = {0: "IDLE", 10: "SAFETY_CHECK", 20: "HYD_START", 30: "HOMING",
+STATE_NAMES = {1: "PLC_OFF", 0: "IDLE", 10: "SAFETY_CHECK", 20: "WAIT_PUMP", 30: "HOMING",
                40: "READY", 50: "MANUAL", 110: "WAIT_PART", 120: "CLAMP_CLOSE",
                130: "PRESS_DOWN", 140: "DWELL", 150: "PRESS_UP", 160: "CLAMP_OPEN",
                170: "UNLOCK", 180: "INDEX", 190: "LOCK", 200: "EJECT_EXT",
-               210: "EJECT_RET", 900: "FAULT", 999: "ESTOP"}
+               210: "EJECT_RET", 800: "PANIC", 900: "FAULT", 999: "GUARD_STOP"}
 
 
 def read_status(c):
@@ -29,11 +29,18 @@ if __name__ == "__main__":
     host = sys.argv[1] if len(sys.argv) > 1 else "127.0.0.1"
     port = int(sys.argv[2]) if len(sys.argv) > 2 else 502
     secs = float(sys.argv[3]) if len(sys.argv) > 3 else 1e9
-    c = ModbusTCPClient(host, port)
+    c = None
     last = None
     end = time.time() + secs
     while time.time() < end:
-        s = read_status(c)
+        try:
+            if c is None:
+                c = ModbusTCPClient(host, port)
+            s = read_status(c)
+        except (OSError, ConnectionError):
+            c = None
+            time.sleep(0.5)
+            continue
         if s != last:
             print(time.strftime("%H:%M:%S"), s, flush=True)
             last = s

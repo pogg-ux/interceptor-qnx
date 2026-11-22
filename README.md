@@ -14,13 +14,22 @@ The same Interceptor, with no code changes, applies to industrial saws, injectio
 ## Repository layout
 | Folder | What |
 |---|---|
-| `sim/` | Field simulator ("the machine"): Modbus TCP slave + passive tap stream. Python, standard library only |
+| `sim/` | Field simulator ("the machine"): Modbus TCP slave + passive tap stream; `simctl.py` controls it, `tap_watch.py` shows the taps. Python, standard library only |
 | `plc/` | PLC program for the virtual PLC (IEC 61131-3 Structured Text) |
 | `setup/` | Install and run scripts for WSL2 Ubuntu. Start with [`setup/PC_SETUP.md`](setup/PC_SETUP.md) |
 | `interceptor/` | The Interceptor itself, C on QNX 8.0 *(in progress)* |
 
+## The simulated machine (rev 2)
+- **Control power:** E-stop breaks a master control relay that powers the whole panel, PLC included. Power returns by cycling the Power/Start selector; the hydraulic pump is started by hand and seals itself in.
+- **Two generations:** gen 1 twist-release E-stop; gen 2 spring-back E-stop plus a **Panic** button that cuts only hazardous-direction motion while the pump keeps running for safe-direction release.
+- **Split control:** the PLC sequences; a separate motion controller owns the 0–10 V command to a proportional amplifier; Cycle Start is wired to both.
+- **Hardwired relay logic** the PLC can't see, plus a guard safety relay with dual channels.
+- **Owner-added sensors and flow meters** (pressures, filter ΔP, motor temp, vibration, flow, volume per stroke) streamed only to the Interceptor.
+- **18 injectable faults**, most of them invisible to the PLC (see `setup/PC_SETUP.md`).
+
 ## Status
-- ✅ Simulated machine + virtual PLC running (full auto cycles, E-stop recovery, injected faults)
+- ✅ Simulated machine rev 2 + virtual PLC running (auto, semi-auto, manual, E-stop power loss, Panic, 18 faults)
+- ✅ Passive tap stream (digital on change + analog every 20 ms): `sim/tap_watch.py`
 - 🔄 Interceptor on QNX 8.0 (QEMU target)
 
 ## Third-party software
