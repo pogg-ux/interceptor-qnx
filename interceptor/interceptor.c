@@ -197,6 +197,21 @@ static int links_open(void)
     return n;
 }
 
+/* Forwarding time: data in -> data out, per chunk (the only delay the
+ * Interceptor adds to the PLC's traffic). Copy-side parsing is after this. */
+static uint64_t fwd_n, fwd_sum_ns, fwd_max_ns, fwd_max_recent_ns, fwd_over_1ms;
+static uint64_t fwd_hist[6];   /* <10us, <50us, <100us, <500us, <1ms, >=1ms */
+
+static void fwd_record(uint64_t ns)
+{
+    fwd_n++; fwd_sum_ns += ns;
+    if (ns > fwd_max_ns) fwd_max_ns = ns;
+    if (ns > fwd_max_recent_ns) fwd_max_recent_ns = ns;
+    int b = ns < 10000 ? 0 : ns < 50000 ? 1 : ns < 100000 ? 2 : ns < 500000 ? 3 : ns < 1000000 ? 4 : 5;
+    fwd_hist[b]++;
+    if (ns >= 1000000) fwd_over_1ms++;
+}
+
 static char vbuf[VIEW_MAX];
 static struct event recent[300];
 static char resmgr_msg[160];
@@ -256,6 +271,13 @@ static void build_views(void)
         if (pairs[i].plc >= 0)
             sb_printf(&b, "  link %d          PLC->field %llu bytes, field->PLC %llu bytes\n",
                       i, pairs[i].to_field, pairs[i].to_plc);
+    if (fwd_n)
+        sb_printf(&b, "  forwarding      avg %.1f us, max %.1f us (last 5 s: %.1f us), %llu chunks, %llu over 1 ms\n"
+                      "                  <10us %llu  <50us %llu  <100us %llu  <500us %llu  <1ms %llu  >=1ms %llu\n",
+                  (double)fwd_sum_ns / fwd_n / 1000.0, fwd_max_ns / 1000.0, fwd_max_recent_ns / 1000.0,
+                  (unsigned long long)fwd_n, (unsigned long long)fwd_over_1ms,
+                  (unsigned long long)fwd_hist[0], (unsigned long long)fwd_hist[1], (unsigned long long)fwd_hist[2],
+                  (unsigned long long)fwd_hist[3], (unsigned long long)fwd_hist[4], (unsigned long long)fwd_hist[5]);
     sb_printf(&b, "  modbus frames   %lu requests, %lu replies, %lu exceptions, %lu bad\n",
               mb.frames_req, mb.frames_rsp, mb.exceptions, mb.bad_frames);
     sb_printf(&b, "  taps            %lu packets (%lu digital, %lu analog frames), %d digital + %d analog channels, %lu bad\n",
@@ -410,7 +432,7 @@ int main(int argc, char **argv)
     httpd_start(web_port, web_msg, sizeof web_msg);
     note("%s", web_msg);
 
-    long long last_live_ms = 0;
+    long long last_live_ms = 0, last_recent_reset_ms = 0;
     char buf[BUF_SIZE + 1];
 
     while (running) {
@@ -468,9 +490,11 @@ int main(int argc, char **argv)
             int from_plc = (pf[k].fd == pairs[i].plc);
             int src = from_plc ? pairs[i].plc : pairs[i].field;
             int dst = from_plc ? pairs[i].field : pairs[i].plc;
+            uint64_t t_in = hr_now_ns();
             ssize_t got = read(src, buf, BUF_SIZE);
             if (got <= 0) { close_pair(i, from_plc ? "PLC hung up" : "field hung up"); continue; }
             if (write_all(dst, buf, got) < 0) { close_pair(i, "write failed"); continue; }
+            fwd_record(hr_now_ns() - t_in);
             /* Forwarded. Now read the copy. */
             if (from_plc) { pairs[i].to_field += got; mb_feed_request(&mb, (uint8_t *)buf, got); }
             else          { pairs[i].to_plc   += got; mb_feed_response(&mb, (uint8_t *)buf, got); }
@@ -483,6 +507,7 @@ int main(int argc, char **argv)
         rules_tick(ev_since_start_ns());
         meters_tick(ev_since_start_ns());
         if (now_ms - last_live_ms >= 250) { last_live_ms = now_ms; build_views(); }
+        if (now_ms - last_recent_reset_ms >= 5000) { last_recent_reset_ms = now_ms; fwd_max_recent_ns = 0; }
     }
 
     for (int i = 0; i < MAX_PAIRS; i++) if (pairs[i].plc >= 0) close_pair(i, "shutdown");

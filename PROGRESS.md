@@ -15,6 +15,9 @@ Everything below runs on QNX 8.0 in QEMU on the EVO X2 and was verified there.
 | Thu Dec 3 | Teach Mode + teach script | ✅ 43 baselines, safety response, 75 labels; saved to VM disk, reloads at start |
 | Fri Dec 4 | Drift rules F1–F4 | ✅ all caught in simulator tests; **F1 caught on the real setup** (491 ms vs 395 ms baseline) |
 | Sat Dec 5 | F5–F7 + F10/F16/F18 analog rules, F8 broken chain, black box, usage meters | ✅ tested in the simulator; `/dev/interceptor/meters`, black box files in `/data/home/qnxuser/blackbox/` |
+| Sun Dec 6 | Priorities + passthrough-under-load test | ✅ built: SCHED_RR priorities (28/16/12/8); forwarding time measured per chunk in `/dev/interceptor/status`; `interceptor/loadtest.sh` (run on the real setup) |
+| Mon Dec 7 | Live web view + desktop notifications | ✅ built: http://localhost:8090 (verify on the real setup) |
+| Tue Dec 8 | README: build/run, QNX version/target/toolchain, QNX evidence table | ✅ |
 | Tue Dec 1 | HMI proxy | ⏳ not started (first item on the cut list) |
 
 ### One-command start / stop
@@ -48,8 +51,9 @@ or `ssh qnxuser@192.168.122.158 cat /dev/interceptor/<view>`
 ### Next
 1. Re-teach with the latest code; test F2, F3, F4, F8 on the real setup.
 2. Verify F5–F7 + meters + black box on the real setup (re-teach first: analog baselines come from Teach).
-3. ~~Live web view + desktop notifications (Dec 7)~~ done: `http://localhost:8090` (verify on the real setup).
-4. README / build steps / demo script / video (Dec 8–12). QNX submit target: Sun Dec 13.
+3. On the real setup: open the dashboard, run `bash interceptor/loadtest.sh 60`, note the forwarding numbers for the write-up.
+4. Demo script + video (Dec 9–12). QNX submit target: Sun Dec 13.
+5. Admin: Devpost drafts, GitHub About section + license visible.
 
 ### More fault tests (analog/count rules)
 | Fault | Inject | Caught by |
