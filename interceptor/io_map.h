@@ -50,6 +50,11 @@ static const char *const SAFETY_CONTACTS[] = { "T_SR1_K1", "T_SR1_K2" };
 /* All of these ON = the machine is allowed to move (power to the outputs). */
 static const char *const POWER_OK_TAPS[] = { "T_CTRL_POWER", "T_SR1_K1", "T_SR1_K2" };
 
+/* Points that change constantly in normal running (heater pulse control).
+ * Still shown in the live table, but kept off the event timeline and console
+ * so they don't bury the motion and safety events. */
+static const char *const QUIET_POINTS[] = { "T_SSR_OUT", "AO_HEAT_DUTY" };
+
 #define N_OF(a) ((int)(sizeof(a) / sizeof((a)[0])))
 
 #endif

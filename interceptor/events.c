@@ -3,6 +3,7 @@
 #include "mapper.h"
 #include "rules.h"
 #include "teach.h"
+#include "io_map.h"
 #include <string.h>
 
 static struct event ring[EV_RING];
@@ -29,8 +30,15 @@ void ev_format(const struct event *e, char *out, size_t len)
         snprintf(out, len, "%6llu.%06llu  %s %-18s %s", s, us, src[e->src], e->name, e->new_v ? "ON" : "off");
 }
 
+static int quiet(const char *name)
+{
+    for (int i = 0; i < N_OF(QUIET_POINTS); i++) if (!strcmp(name, QUIET_POINTS[i])) return 1;
+    return 0;
+}
+
 void ev_push(enum ev_src src, const char *name, int old_v, int new_v)
 {
+    if (old_v >= 0 && quiet(name)) return;      /* heater pulses etc.: live table only */
     struct event *e = &ring[seq % EV_RING];
     e->seq = seq++;
     e->t_ns = hr_now_ns() - t0;
