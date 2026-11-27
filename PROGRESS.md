@@ -18,6 +18,7 @@ Everything below runs on QNX 8.0 in QEMU on the EVO X2 and was verified there.
 | Sun Dec 6 | Priorities + passthrough-under-load test | ✅ built: SCHED_RR priorities (28/16/12/8); forwarding time measured per chunk in `/dev/interceptor/status`; `interceptor/loadtest.sh` (run on the real setup) |
 | Mon Dec 7 | Live web view + desktop notifications | ✅ built: http://localhost:8090 (verify on the real setup) |
 | Tue Dec 8 | README: build/run, QNX version/target/toolchain, QNX evidence table | ✅ |
+| Wed Dec 9 | Demo script: teach → normal → drift → catch | ✅ `python3 sim/demo.py` (F1, F3, F2, F8 with captions; tested in the simulator) |
 | Tue Dec 1 | HMI proxy | ⏳ not started (first item on the cut list) |
 
 ### One-command start / stop
@@ -52,7 +53,7 @@ or `ssh qnxuser@192.168.122.158 cat /dev/interceptor/<view>`
 1. Re-teach with the latest code; test F2, F3, F4, F8 on the real setup.
 2. Verify F5–F7 + meters + black box on the real setup (re-teach first: analog baselines come from Teach).
 3. On the real setup: open the dashboard, run `bash interceptor/loadtest.sh 60`, note the forwarding numbers for the write-up.
-4. Demo script + video (Dec 9–12). QNX submit target: Sun Dec 13.
+4. Record the video (Dec 10–12): `start.sh` (taught) → dashboard open → `python3 sim/demo.py`. QNX submit target: Sun Dec 13.
 5. Admin: Devpost drafts, GitHub About section + license visible.
 
 ### More fault tests (analog/count rules)
