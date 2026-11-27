@@ -22,7 +22,7 @@ struct out_edge {
     /* open window */
     int open;
     int interrupted;             /* safety stop during this window */
-    uint64_t t0;
+    uint64_t t0;                 /* when this edge last happened */
     char got[MAX_RESULTS * 2][24];   /* points already recorded this window */
     int ngot;
 };
@@ -114,6 +114,29 @@ void mapper_set_paused(int p)
     paused = p;
 }
 
+/* Another output edge that is credited with the same result: an output the
+ * PLC switches in the same scan, so the cause is ambiguous. Returns:
+ *   0 = no twin (this edge alone owns the result)
+ *   1 = twin exists and also switched at the same instant this time
+ *   2 = twin exists but did NOT switch this time (the result is the twin's)
+ *   3 = twin switched too and will report this result (report once per pair) */
+static int twin_state(const struct out_edge *oe, const struct result *r)
+{
+    int have_twin = 0;
+    for (int i = 0; i < nedges; i++) {
+        const struct out_edge *e = &edges[i];
+        if (e == oe) continue;
+        for (int k = 0; k < e->nr; k++) {
+            const struct result *x = &e->r[k];
+            if (x->v != r->v || strcmp(x->name, r->name) || !trusted(e, x)) continue;
+            have_twin = 1;
+            uint64_t d = e->t0 > oe->t0 ? e->t0 - oe->t0 : oe->t0 - e->t0;
+            if (d <= 2000000ULL) return e < oe ? 3 : 1;
+        }
+    }
+    return have_twin ? 2 : 0;
+}
+
 static void close_window_at(struct out_edge *oe, uint64_t now_ns, int timed_out)
 {
     if (!oe->open) return;
@@ -127,7 +150,11 @@ static void close_window_at(struct out_edge *oe, uint64_t now_ns, int timed_out)
             if (!trusted(oe, r)) continue;
             int got = 0;
             for (int j = 0; j < oe->ngot; j++) if (strcmp(oe->got[j], r->name) == 0) { got = 1; break; }
-            if (!got) missing_cb(oe->name, oe->v, r->name, r->v, r->mean, (double)(now_ns - oe->t0) / 1e6);
+            if (got) continue;
+            /* Shared result: only expected if its twin switched too. */
+            int tw = twin_state(oe, r);
+            if (tw == 2 || tw == 3) continue;
+            missing_cb(oe->name, oe->v, r->name, r->v, r->mean, (double)(now_ns - oe->t0) / 1e6);
         }
     }
     oe->windows++;
