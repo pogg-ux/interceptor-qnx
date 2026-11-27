@@ -1,5 +1,6 @@
 #include "events.h"
 #include "hrclock.h"
+#include "mapper.h"
 #include <string.h>
 
 static struct event ring[EV_RING];
@@ -37,6 +38,7 @@ void ev_push(enum ev_src src, const char *name, int old_v, int new_v)
     char line[96];
     ev_format(e, line, sizeof line);
     puts(line);
+    mapper_on_event(e);
 }
 
 void ev_dump(FILE *f, int n)

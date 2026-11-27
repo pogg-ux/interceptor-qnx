@@ -2,7 +2,7 @@
 #include <string.h>
 
 struct views g_views = { .lock = PTHREAD_MUTEX_INITIALIZER };
-const char *const VIEW_NAMES[VIEW_N] = { "live", "events", "status" };
+const char *const VIEW_NAMES[VIEW_N] = { "live", "events", "status", "map", "map.json" };
 
 void views_set(enum view_id v, const char *text, size_t len)
 {

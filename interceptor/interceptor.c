@@ -1,5 +1,5 @@
 /*
- * Interceptor v3 - for QNX 8.0.
+ * Interceptor v4 - for QNX 8.0.
  *
  * 1. Passthrough: the PLC connects here (default :5020). The Interceptor
  *    opens its own connection to the field side (default 192.168.122.1:5021)
@@ -13,7 +13,8 @@
  *    with ClockCycles() the moment the Interceptor sees it.
  *
  * 5. Resource manager (QNX): the views are files any tool can read:
- *      cat /dev/interceptor/live | events | status    (needs root to create)
+ *      cat /dev/interceptor/live | events | status | map | map.json   (root)
+ * 6. Mapper: learns output -> result -> time chains from normal running.
  *
  * Outputs (on QNX):
  *   stdout                     every event as it happens
@@ -44,6 +45,7 @@
 #include "taps.h"
 #include "hrclock.h"
 #include "views.h"
+#include "mapper.h"
 
 #define MAX_PAIRS 8
 #define BUF_SIZE  4096
@@ -51,7 +53,9 @@
 static char LIVE_PATH[256] = "/tmp/interceptor_live";
 static char EVENTS_PATH[256] = "/tmp/interceptor_events";
 static char STATUS_PATH[256] = "/tmp/interceptor_status";
-static char LIVE_TMP[264], EVENTS_TMP[264], STATUS_TMP[264];
+static char MAP_PATH[256] = "/tmp/interceptor_map";
+static char MAPJSON_PATH[256] = "/tmp/interceptor_map.json";
+static char LIVE_TMP[264], EVENTS_TMP[264], STATUS_TMP[264], MAP_TMP[264], MAPJSON_TMP[264];
 
 static void pick_output_dir(void)
 {
@@ -59,7 +63,11 @@ static void pick_output_dir(void)
         snprintf(LIVE_PATH, sizeof LIVE_PATH, "./interceptor_live");
         snprintf(EVENTS_PATH, sizeof EVENTS_PATH, "./interceptor_events");
         snprintf(STATUS_PATH, sizeof STATUS_PATH, "./interceptor_status");
+        snprintf(MAP_PATH, sizeof MAP_PATH, "./interceptor_map");
+        snprintf(MAPJSON_PATH, sizeof MAPJSON_PATH, "./interceptor_map.json");
     }
+    snprintf(MAP_TMP, sizeof MAP_TMP, "%s.tmp", MAP_PATH);
+    snprintf(MAPJSON_TMP, sizeof MAPJSON_TMP, "%s.tmp", MAPJSON_PATH);
     snprintf(STATUS_TMP, sizeof STATUS_TMP, "%s.tmp", STATUS_PATH);
     snprintf(LIVE_TMP, sizeof LIVE_TMP, "%s.tmp", LIVE_PATH);
     snprintf(EVENTS_TMP, sizeof EVENTS_TMP, "%s.tmp", EVENTS_PATH);
@@ -186,7 +194,7 @@ static void build_views(void)
 
     /* ---- status ---- */
     b = (struct sbuf){ vbuf, 0, sizeof vbuf };
-    sb_printf(&b, "Interceptor v3 status\n");
+    sb_printf(&b, "Interceptor v4 status\n");
     sb_printf(&b, "  mode            passthrough, read-and-log only (never drives an output)\n");
     sb_printf(&b, "  uptime          %llu s\n", up);
     sb_printf(&b, "  clock           %s\n", hr_source());
@@ -204,6 +212,14 @@ static void build_views(void)
     sb_printf(&b, "  /dev            %s\n", resmgr_msg);
     views_set(VIEW_STATUS, b.p, b.len);
     save_file(STATUS_PATH, STATUS_TMP, b.p, b.len);
+
+    /* ---- map ---- */
+    size_t ml = mapper_format(vbuf, sizeof vbuf);
+    views_set(VIEW_MAP, vbuf, ml);
+    save_file(MAP_PATH, MAP_TMP, vbuf, ml);
+    ml = mapper_json(vbuf, sizeof vbuf);
+    views_set(VIEW_MAPJSON, vbuf, ml);
+    save_file(MAPJSON_PATH, MAPJSON_TMP, vbuf, ml);
 }
 
 static void set_nodelay(int fd)
@@ -284,13 +300,14 @@ int main(int argc, char **argv)
     pick_output_dir();
     mb_init(&mb, on_change);
     taps_init(&taps);
+    mapper_init();
 
     int ls = open_listen(listen_port);
     if (ls < 0) { perror("listen"); return 1; }
     int us = open_udp(tap_port);
     if (us < 0) { perror("tap port"); return 1; }
 
-    note("Interceptor v3 up. PLC side :%d -> field %s:%d. Taps on UDP :%d. Clock %s",
+    note("Interceptor v4 up. PLC side :%d -> field %s:%d. Taps on UDP :%d. Clock %s",
          listen_port, field_host, field_port, tap_port, hr_source());
     resmgr_start(resmgr_msg, sizeof resmgr_msg);
     note("/dev: %s", resmgr_msg);
@@ -356,6 +373,7 @@ int main(int argc, char **argv)
         }
 
         long long now_ms = (long long)(ev_since_start_ns() / 1000000ULL);
+        mapper_tick(ev_since_start_ns());
         if (now_ms - last_live_ms >= 250) { last_live_ms = now_ms; build_views(); }
     }
 

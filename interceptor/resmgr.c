@@ -3,6 +3,8 @@
  *   /dev/interceptor/live     I/O + tap table
  *   /dev/interceptor/events   event timeline (newest 300)
  *   /dev/interceptor/status   link health and counters
+ *   /dev/interceptor/map      learned output -> result -> time chains
+ *   /dev/interceptor/map.json same, machine-readable
  * Any QNX tool can read them:  cat /dev/interceptor/status
  *
  * Runs in its own thread with a standard dispatch loop, so a slow reader can
@@ -109,7 +111,7 @@ int resmgr_start(char *why, size_t why_len)
         snprintf(why, why_len, "pthread_create failed");
         return -1;
     }
-    snprintf(why, why_len, "/dev/interceptor/{live,events,status} ready");
+    snprintf(why, why_len, "/dev/interceptor/{live,events,status,map,map.json} ready");
     return 0;
 }
 #endif

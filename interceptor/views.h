@@ -7,7 +7,7 @@
 #include <stddef.h>
 #include <pthread.h>
 
-enum view_id { VIEW_LIVE, VIEW_EVENTS, VIEW_STATUS, VIEW_N };
+enum view_id { VIEW_LIVE, VIEW_EVENTS, VIEW_STATUS, VIEW_MAP, VIEW_MAPJSON, VIEW_N };
 
 #define VIEW_MAX 32768
 
@@ -18,14 +18,14 @@ struct views {
 };
 
 extern struct views g_views;
-extern const char *const VIEW_NAMES[VIEW_N];   /* "live", "events", "status" */
+extern const char *const VIEW_NAMES[VIEW_N];   /* "live", "events", "status", "map", "map.json" */
 
 /* Replace one view (thread-safe). */
 void views_set(enum view_id v, const char *text, size_t len);
 /* Copy one view out (thread-safe). Returns length copied. */
 size_t views_get(enum view_id v, char *out, size_t max);
 
-/* Start the QNX resource manager: /dev/interceptor/{live,events,status}.
+/* Start the QNX resource manager: /dev/interceptor/{live,events,status,map,map.json}.
  * Returns 0 if running, -1 if not available (not QNX, or not root). */
 int resmgr_start(char *why, size_t why_len);
 
