@@ -45,6 +45,14 @@ fi
 say "Asking for your Ubuntu password now (OpenPLC needs it for port 502)"
 sudo -v
 
+# The VM's network (virbr0 + its DHCP server) doesn't always come back after
+# WSL restarts: a leftover virbr0 blocks it. Repair it before booting QNX.
+if ! sudo virsh net-info default 2>/dev/null | grep -q "Active:.*yes"; then
+  say "Starting the VM network (it didn't come back after WSL restarted)"
+  ip link show virbr0 >/dev/null 2>&1 && sudo ip link delete virbr0
+  sudo virsh net-start default >/dev/null || { say "Could not start the VM network: sudo virsh net-start default"; exit 1; }
+fi
+
 # Make sure OpenPLC points at the Interceptor, not straight at the simulator.
 MB="$HOME/OpenPLC_v3/webserver/mbconfig.cfg"
 if ! grep -q "$QNX_IP" "$MB" 2>/dev/null; then
