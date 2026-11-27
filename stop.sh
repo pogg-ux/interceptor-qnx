@@ -25,4 +25,5 @@ pkill -f gipc_sim.py 2>/dev/null
 sudo pkill -f webserver.py 2>/dev/null; sudo pkill -f core/openplc 2>/dev/null
 pkill -f qemu-system 2>/dev/null
 pkill -f webview.py 2>/dev/null
+pkill -f interceptor/uplink.py 2>/dev/null
 echo "=== Everything stopped. Start again with: bash ~/interceptor-qnx/start.sh ==="
