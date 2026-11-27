@@ -5,7 +5,8 @@ set -e
 cd "$(dirname "$0")"
 QNX_IP="${QNX_IP:-192.168.122.158}"
 [ -n "$QNX_HOST" ] || source ~/qnx800/qnxsdp-env.sh >/dev/null
-qcc -Vgcc_ntox86_64 -O2 -Wall interceptor.c modbus.c -o interceptor -lsocket
+qcc -Vgcc_ntox86_64 -O2 -Wall interceptor.c modbus.c events.c taps.c -o interceptor -lsocket
 echo "Built. Copying to qnxuser@$QNX_IP ..."
-cat interceptor | ssh qnxuser@"$QNX_IP" 'cat > interceptor && chmod +x interceptor'
+# Write to a new name, then swap, so this works even while the old one is running.
+cat interceptor | ssh qnxuser@"$QNX_IP" 'cat > interceptor.new && chmod +x interceptor.new && mv -f interceptor.new interceptor'
 echo "=== Deployed. In the QNX window run:  /data/home/qnxuser/interceptor ==="

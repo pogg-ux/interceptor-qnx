@@ -1,21 +1,27 @@
 /*
- * Interceptor v1 - TCP passthrough + Modbus copy-side parser for QNX 8.0.
+ * Interceptor v2 - for QNX 8.0.
  *
- * The PLC connects here (listen port, default 5020). For each PLC connection
- * the Interceptor opens its own connection to the field side (the simulator,
- * default 192.168.122.1:5021) and copies bytes both ways, unchanged.
- * It never creates, changes or drops traffic.
+ * 1. Passthrough: the PLC connects here (default :5020). The Interceptor
+ *    opens its own connection to the field side (default 192.168.122.1:5021)
+ *    and copies bytes both ways, unchanged. It never creates, changes or
+ *    drops traffic.
+ * 2. Copy side: AFTER each chunk is forwarded, a copy goes to the Modbus
+ *    parser, which keeps a live table of every PLC input and output.
+ * 3. Taps: hardwired signals the PLC can't see (relay coils/contacts, both
+ *    safety channels, owner-added sensors) arrive on UDP :6000.
+ * 4. Timeline: every change from 2 and 3 goes into ONE event queue, stamped
+ *    with ClockCycles() the moment the Interceptor sees it.
  *
- * AFTER each chunk is forwarded, a copy goes to the Modbus parser, which keeps
- * a live table of every input and output:
- *   - prints each digital change (inputs and outputs) as it happens
- *   - writes the whole table to /tmp/interceptor_live 4 times a second
- *     (cat /tmp/interceptor_live on QNX; becomes /dev/interceptor/live later)
+ * Outputs (on QNX):
+ *   stdout                     every event as it happens
+ *   /tmp/interceptor_live      full I/O + tap table, 4x per second
+ *   /tmp/interceptor_events    newest 300 events, 4x per second
  *
  * Build (in WSL):  bash deploy.sh
- * Run (on QNX):    ./interceptor [listen_port] [field_host] [field_port]
+ * Run (on QNX):    ./interceptor [listen_port] [field_host] [field_port] [tap_port]
  */
 #include <stdio.h>
+#include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
@@ -30,32 +36,50 @@
 
 #include "modbus.h"
 #include "io_map.h"
+#include "events.h"
+#include "taps.h"
+#include "hrclock.h"
 
 #define MAX_PAIRS 8
 #define BUF_SIZE  4096
+/* Output files go in /tmp; if /tmp isn't writable, the current folder. */
+static char LIVE_PATH[256] = "/tmp/interceptor_live";
+static char EVENTS_PATH[256] = "/tmp/interceptor_events";
+static char LIVE_TMP[264], EVENTS_TMP[264];
+
+static void pick_output_dir(void)
+{
+    if (access("/tmp", W_OK) != 0) {
+        snprintf(LIVE_PATH, sizeof LIVE_PATH, "./interceptor_live");
+        snprintf(EVENTS_PATH, sizeof EVENTS_PATH, "./interceptor_events");
+    }
+    snprintf(LIVE_TMP, sizeof LIVE_TMP, "%s.tmp", LIVE_PATH);
+    snprintf(EVENTS_TMP, sizeof EVENTS_TMP, "%s.tmp", EVENTS_PATH);
+}
 
 struct pair {
     int plc;            /* socket to the PLC (Modbus master) */
     int field;          /* socket to the field side (Modbus slave) */
-    unsigned long long to_field, to_plc;   /* bytes forwarded */
-    unsigned long req, rsp;                /* read() chunks forwarded */
+    unsigned long long to_field, to_plc;
 };
 
 static struct pair pairs[MAX_PAIRS];
 static volatile sig_atomic_t running = 1;
 static struct mb_state mb;
-
-#define LIVE_PATH "/tmp/interceptor_live"
+static struct tap_state taps;
 
 static void on_signal(int s) { (void)s; running = 0; }
 
-static void stamp(void)
+static void note(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+static void note(const char *fmt, ...)
 {
-    struct timespec ts;
-    clock_gettime(CLOCK_REALTIME, &ts);
-    struct tm tm;
-    localtime_r(&ts.tv_sec, &tm);
-    printf("%02d:%02d:%02d.%03ld ", tm.tm_hour, tm.tm_min, tm.tm_sec, ts.tv_nsec / 1000000);
+    char msg[160];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(msg, sizeof msg, fmt, ap);
+    va_end(ap);
+    unsigned long long t = ev_since_start_ns();
+    printf("%6llu.%06llu  -- %s\n", t / 1000000000ULL, (t % 1000000000ULL) / 1000, msg);
 }
 
 static const char *point_name(enum mb_table t, int i)
@@ -74,43 +98,46 @@ static const char *point_name(enum mb_table t, int i)
 
 static void on_change(enum mb_table t, int i, int old_v, int new_v)
 {
-    static const char *kind[] = { "IN ", "OUT", "AI ", "AO " };
-    stamp();
-    if (old_v < 0)
-        printf("%s %-16s = %d\n", kind[t], point_name(t, i), new_v);
-    else if (t == MB_HR)
-        printf("%s %-16s %d -> %d\n", kind[t], point_name(t, i), old_v, new_v);
-    else
-        printf("%s %-16s %s\n", kind[t], point_name(t, i), new_v ? "ON" : "off");
+    enum ev_src src = t == MB_DI ? EV_IN : t == MB_COIL ? EV_OUT : EV_AO;
+    ev_push(src, point_name(t, i), old_v, new_v);
 }
 
-/* Write the whole live table to a temp file, then rename (readers never see half a table). */
 static void write_live(void)
 {
-    FILE *f = fopen(LIVE_PATH ".tmp", "w");
+    FILE *f = fopen(LIVE_TMP, "w");
     if (!f) return;
-    struct timespec ts;
-    clock_gettime(CLOCK_REALTIME, &ts);
-    fprintf(f, "Interceptor live I/O   frames %lu req / %lu rsp   exceptions %lu   bad %lu\n",
-            mb.frames_req, mb.frames_rsp, mb.exceptions, mb.bad_frames);
-    static const struct { enum mb_table t; int n; const char *title; } sec[] = {
-        { MB_DI, 0, "INPUTS (PLC reads)" }, { MB_COIL, 0, "OUTPUTS (PLC writes)" },
-        { MB_IR, 0, "ANALOG IN" },          { MB_HR, 0, "ANALOG OUT" },
-    };
+    unsigned long long up = ev_since_start_ns() / 1000000000ULL;
+    fprintf(f, "Interceptor live   up %llus   events %llu   clock %s\n",
+            up, (unsigned long long)ev_count(), hr_source());
+    fprintf(f, "Modbus  %lu req / %lu rsp  exc %lu  bad %lu      Taps  %lu pkts  bad %lu\n",
+            mb.frames_req, mb.frames_rsp, mb.exceptions, mb.bad_frames, taps.packets, taps.bad);
+
+    static const char *title[] = { "INPUTS (PLC reads)", "OUTPUTS (PLC writes)", "ANALOG IN", "ANALOG OUT" };
     int counts[] = { N_OF(DI_NAMES), N_OF(COIL_NAMES), N_OF(IR_NAMES), N_OF(HR_NAMES) };
-    for (int k = 0; k < 4; k++) {
-        enum mb_table t = sec[k].t;
-        fprintf(f, "\n%s\n", sec[k].title);
-        for (int i = 0; i < counts[k]; i++) {
-            if (!mb.known[t][i]) { fprintf(f, "  %-20s   -\n", point_name(t, i)); continue; }
-            if (t == MB_DI || t == MB_COIL)
-                fprintf(f, "  %-20s %s\n", point_name(t, i), mb.value[t][i] ? "ON" : " .");
-            else
-                fprintf(f, "  %-20s %6d\n", point_name(t, i), mb.value[t][i]);
+    for (int t = 0; t < 4; t++) {
+        fprintf(f, "\n%s\n", title[t]);
+        for (int i = 0; i < counts[t]; i++) {
+            const char *nm = point_name((enum mb_table)t, i);
+            if (!mb.known[t][i])                fprintf(f, "  %-20s   -\n", nm);
+            else if (t == MB_DI || t == MB_COIL) fprintf(f, "  %-20s %s\n", nm, mb.value[t][i] ? "ON" : " .");
+            else                                fprintf(f, "  %-20s %6d\n", nm, mb.value[t][i]);
         }
     }
+    fprintf(f, "\nHARDWIRED TAPS (PLC can't see these)\n");
+    for (int i = 0; i < taps.n; i++)
+        fprintf(f, "  %-20s %s\n", taps.name[i], taps.value[i] ? "ON" : " .");
+    fprintf(f, "\nTAPPED ANALOG\n");
+    for (int i = 0; i < taps.na; i++)
+        fprintf(f, "  %-20s %10.2f\n", taps.aname[i], taps.avalue[i]);
     fclose(f);
-    rename(LIVE_PATH ".tmp", LIVE_PATH);
+    rename(LIVE_TMP, LIVE_PATH);
+
+    f = fopen(EVENTS_TMP, "w");
+    if (!f) return;
+    fprintf(f, "Interceptor event timeline (newest last)   seconds since start, clock %s\n", hr_source());
+    ev_dump(f, 300);
+    fclose(f);
+    rename(EVENTS_TMP, EVENTS_PATH);
 }
 
 static void set_nodelay(int fd)
@@ -132,7 +159,6 @@ static int connect_field(const char *host, int port)
     return fd;
 }
 
-/* Write all bytes; returns 0 on success, -1 on error. */
 static int write_all(int fd, const char *buf, ssize_t n)
 {
     while (n > 0) {
@@ -145,13 +171,35 @@ static int write_all(int fd, const char *buf, ssize_t n)
 
 static void close_pair(int i, const char *why)
 {
-    stamp();
-    printf("link %d closed (%s): PLC->field %llu bytes, field->PLC %llu bytes\n",
-           i, why, pairs[i].to_field, pairs[i].to_plc);
-    fflush(stdout);
+    note("link %d closed (%s): PLC->field %llu bytes, field->PLC %llu bytes",
+         i, why, pairs[i].to_field, pairs[i].to_plc);
     close(pairs[i].plc);
     close(pairs[i].field);
     pairs[i].plc = pairs[i].field = -1;
+}
+
+static int open_listen(int port)
+{
+    int ls = socket(AF_INET, SOCK_STREAM, 0);
+    int one = 1;
+    setsockopt(ls, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+    struct sockaddr_in a = {0};
+    a.sin_family = AF_INET;
+    a.sin_port = htons(port);
+    a.sin_addr.s_addr = htonl(INADDR_ANY);
+    if (bind(ls, (struct sockaddr *)&a, sizeof a) < 0 || listen(ls, 4) < 0) return -1;
+    return ls;
+}
+
+static int open_udp(int port)
+{
+    int s = socket(AF_INET, SOCK_DGRAM, 0);
+    struct sockaddr_in a = {0};
+    a.sin_family = AF_INET;
+    a.sin_port = htons(port);
+    a.sin_addr.s_addr = htonl(INADDR_ANY);
+    if (bind(s, (struct sockaddr *)&a, sizeof a) < 0) return -1;
+    return s;
 }
 
 int main(int argc, char **argv)
@@ -159,39 +207,36 @@ int main(int argc, char **argv)
     int listen_port = argc > 1 ? atoi(argv[1]) : 5020;
     const char *field_host = argc > 2 ? argv[2] : "192.168.122.1";
     int field_port = argc > 3 ? atoi(argv[3]) : 5021;
+    int tap_port = argc > 4 ? atoi(argv[4]) : 6000;
 
     signal(SIGINT, on_signal);
     signal(SIGTERM, on_signal);
     signal(SIGPIPE, SIG_IGN);
+    setvbuf(stdout, NULL, _IOLBF, 0);
     for (int i = 0; i < MAX_PAIRS; i++) pairs[i].plc = pairs[i].field = -1;
+    ev_init();
+    pick_output_dir();
     mb_init(&mb, on_change);
+    taps_init(&taps);
 
-    int ls = socket(AF_INET, SOCK_STREAM, 0);
-    int one = 1;
-    setsockopt(ls, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
-    struct sockaddr_in a = {0};
-    a.sin_family = AF_INET;
-    a.sin_port = htons(listen_port);
-    a.sin_addr.s_addr = htonl(INADDR_ANY);
-    if (bind(ls, (struct sockaddr *)&a, sizeof a) < 0 || listen(ls, 4) < 0) {
-        perror("listen");
-        return 1;
-    }
+    int ls = open_listen(listen_port);
+    if (ls < 0) { perror("listen"); return 1; }
+    int us = open_udp(tap_port);
+    if (us < 0) { perror("tap port"); return 1; }
 
-    stamp();
-    printf("Interceptor v1 up. PLC side :%d  ->  field side %s:%d (passthrough, read-only)\n",
-           listen_port, field_host, field_port);
-    fflush(stdout);
+    note("Interceptor v2 up. PLC side :%d -> field %s:%d. Taps on UDP :%d. Clock %s",
+         listen_port, field_host, field_port, tap_port, hr_source());
+    note("Live table: %s   Timeline: %s", LIVE_PATH, EVENTS_PATH);
 
-    time_t last_report = time(NULL);
     long long last_live_ms = 0;
-    char buf[BUF_SIZE];
+    char buf[BUF_SIZE + 1];
 
     while (running) {
-        struct pollfd pf[1 + 2 * MAX_PAIRS];
-        int map[1 + 2 * MAX_PAIRS];   /* pair index for each pollfd */
+        struct pollfd pf[2 + 2 * MAX_PAIRS];
+        int map[2 + 2 * MAX_PAIRS];   /* -1 listen, -2 taps, else pair index */
         int n = 0;
         pf[n].fd = ls; pf[n].events = POLLIN; map[n++] = -1;
+        pf[n].fd = us; pf[n].events = POLLIN; map[n++] = -2;
         for (int i = 0; i < MAX_PAIRS; i++) {
             if (pairs[i].plc < 0) continue;
             pf[n].fd = pairs[i].plc;   pf[n].events = POLLIN; map[n++] = i;
@@ -204,7 +249,12 @@ int main(int argc, char **argv)
         for (int k = 0; k < n && r > 0; k++) {
             if (!pf[k].revents) continue;
             r--;
-            if (map[k] < 0) {
+            if (map[k] == -2) {
+                ssize_t got = recv(us, buf, BUF_SIZE, 0);
+                if (got > 0) { buf[got] = 0; taps_feed(&taps, buf, (int)got); }
+                continue;
+            }
+            if (map[k] == -1) {
                 int c = accept(ls, NULL, NULL);
                 if (c < 0) continue;
                 set_nodelay(c);
@@ -212,10 +262,7 @@ int main(int argc, char **argv)
                 for (int i = 0; i < MAX_PAIRS; i++) if (pairs[i].plc < 0) { slot = i; break; }
                 int f = slot >= 0 ? connect_field(field_host, field_port) : -1;
                 if (f < 0) {
-                    stamp();
-                    printf("PLC connected but field side %s:%d is not reachable; dropping\n",
-                           field_host, field_port);
-                    fflush(stdout);
+                    note("PLC connected but field side %s:%d is not reachable; dropping", field_host, field_port);
                     close(c);
                     continue;
                 }
@@ -223,45 +270,30 @@ int main(int argc, char **argv)
                 pairs[slot].plc = c;
                 pairs[slot].field = f;
                 mb_reset_streams(&mb);
-                stamp();
-                printf("link %d open: PLC <-> Interceptor <-> field\n", slot);
-                fflush(stdout);
+                note("link %d open: PLC <-> Interceptor <-> field", slot);
                 continue;
             }
             int i = map[k];
-            if (pairs[i].plc < 0) continue;   /* closed earlier in this loop */
+            if (pairs[i].plc < 0) continue;
             int from_plc = (pf[k].fd == pairs[i].plc);
             int src = from_plc ? pairs[i].plc : pairs[i].field;
             int dst = from_plc ? pairs[i].field : pairs[i].plc;
-            ssize_t got = read(src, buf, sizeof buf);
+            ssize_t got = read(src, buf, BUF_SIZE);
             if (got <= 0) { close_pair(i, from_plc ? "PLC hung up" : "field hung up"); continue; }
             if (write_all(dst, buf, got) < 0) { close_pair(i, "write failed"); continue; }
             /* Forwarded. Now read the copy. */
-            if (from_plc) { pairs[i].to_field += got; pairs[i].req++; mb_feed_request(&mb, (uint8_t *)buf, got); }
-            else          { pairs[i].to_plc   += got; pairs[i].rsp++; mb_feed_response(&mb, (uint8_t *)buf, got); }
+            if (from_plc) { pairs[i].to_field += got; mb_feed_request(&mb, (uint8_t *)buf, got); }
+            else          { pairs[i].to_plc   += got; mb_feed_response(&mb, (uint8_t *)buf, got); }
         }
 
-        struct timespec mono;
-        clock_gettime(CLOCK_MONOTONIC, &mono);
-        long long now_ms = mono.tv_sec * 1000LL + mono.tv_nsec / 1000000;
+        long long now_ms = (long long)(ev_since_start_ns() / 1000000ULL);
         if (now_ms - last_live_ms >= 250) { last_live_ms = now_ms; write_live(); }
-        fflush(stdout);
-
-        time_t now = time(NULL);
-        if (now - last_report >= 30) {
-            last_report = now;
-            for (int i = 0; i < MAX_PAIRS; i++) {
-                if (pairs[i].plc < 0) continue;
-                stamp();
-                printf("link %d: %lu requests, %lu replies, %llu/%llu bytes\n",
-                       i, pairs[i].req, pairs[i].rsp, pairs[i].to_field, pairs[i].to_plc);
-            }
-            fflush(stdout);
-        }
     }
 
     for (int i = 0; i < MAX_PAIRS; i++) if (pairs[i].plc >= 0) close_pair(i, "shutdown");
     close(ls);
-    stamp(); printf("Interceptor stopped\n");
+    close(us);
+    write_live();
+    note("Interceptor stopped");
     return 0;
 }

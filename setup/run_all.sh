@@ -2,6 +2,7 @@
 # Start the GIPC simulator + OpenPLC, then show the PLC state live.
 # Stop everything with Ctrl+C.
 # Usage: bash run_all.sh        (gen 1 machine: twist-release E-stop)
+#        TAP_HOST=192.168.122.158 bash run_all.sh   (send hardwired taps to the Interceptor on QNX)
 #        bash run_all.sh 2      (gen 2 machine: spring-back E-stop + Panic button)
 GEN="${1:-1}"
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -16,7 +17,7 @@ pkill -f gipc_sim.py 2>/dev/null
 sleep 1
 
 echo "Starting simulator (gen $GEN)..."
-cd "$REPO/sim" && python3 gipc_sim.py --gen "$GEN" > "$LOGS/sim.log" 2>&1 &
+cd "$REPO/sim" && python3 gipc_sim.py --gen "$GEN" --tap-host "${TAP_HOST:-127.0.0.1}" > "$LOGS/sim.log" 2>&1 &
 SIM=$!
 sleep 1
 echo "Starting OpenPLC (web page: http://localhost:8080  login openplc / openplc)..."
