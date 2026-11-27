@@ -16,6 +16,7 @@
  * offset 0 takes a fresh snapshot of the view.
  */
 #include "views.h"
+#include "prio.h"
 #include <stdio.h>
 #include <string.h>
 #include <errno.h>
@@ -96,6 +97,7 @@ static void *resmgr_thread(void *arg)
 {
     (void)arg;
     dispatch_context_t *ctp = dispatch_context_alloc(dpp);
+    prio_set(PRIO_RESMGR);
     if (!ctp) return NULL;
     for (;;) {
         if ((ctp = dispatch_block(ctp)) == NULL) continue;

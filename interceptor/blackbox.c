@@ -1,6 +1,7 @@
 #include "blackbox.h"
 #include "events.h"
 #include "views.h"
+#include "prio.h"
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -22,6 +23,7 @@ struct job { char path[256]; char *text; size_t len; };
 static void *writer(void *arg)
 {
     struct job *j = arg;
+    prio_set(PRIO_BLACKBOX);
     FILE *f = fopen(j->path, "w");
     if (f) { fwrite(j->text, 1, j->len, f); fclose(f); }
     free(j->text);

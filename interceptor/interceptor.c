@@ -59,6 +59,7 @@
 #include "blackbox.h"
 #include "points.h"
 #include "httpd.h"
+#include "prio.h"
 
 #define MAX_PAIRS 8
 #define BUF_SIZE  4096
@@ -366,6 +367,8 @@ int main(int argc, char **argv)
     int cmd_port = argc > 5 ? atoi(argv[5]) : 6002;
     int web_port = argc > 6 ? atoi(argv[6]) : 8081;
 
+    /* Passthrough first: highest real-time priority in this process. */
+    int prio_ok = prio_set(PRIO_PASSTHROUGH) == 0;
     signal(SIGINT, on_signal);
     signal(SIGTERM, on_signal);
     signal(SIGPIPE, SIG_IGN);
@@ -396,6 +399,8 @@ int main(int argc, char **argv)
          listen_port, field_host, field_port, tap_port, hr_source());
     resmgr_start(resmgr_msg, sizeof resmgr_msg);
     note("/dev: %s", resmgr_msg);
+    note("priorities: passthrough %d, resmgr %d, black box %d, web %d (SCHED_RR)%s",
+         PRIO_PASSTHROUGH, PRIO_RESMGR, PRIO_BLACKBOX, PRIO_WEB, prio_ok ? "" : " - could not set (run as root)");
     note("Also written to %s and %s", LIVE_PATH, EVENTS_PATH);
     int loaded = teach_load();
     if (loaded >= 0) note("Taught map loaded: %d motion baselines from %s", loaded, teach_save_path());

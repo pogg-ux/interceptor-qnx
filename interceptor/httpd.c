@@ -1,5 +1,6 @@
 #include "httpd.h"
 #include "views.h"
+#include "prio.h"
 #include "web_files.h"
 #include <errno.h>
 #include <pthread.h>
@@ -66,6 +67,7 @@ static void handle(int fd)
 static void *server(void *arg)
 {
     (void)arg;
+    prio_set(PRIO_WEB);
     for (;;) {
         int c = accept(ls, NULL, NULL);
         if (c < 0) { if (errno == EINTR) continue; usleep(100000); continue; }
