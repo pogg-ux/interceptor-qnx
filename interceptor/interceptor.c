@@ -1,5 +1,5 @@
 /*
- * Interceptor v4 - for QNX 8.0.
+ * Interceptor v6 - for QNX 8.0.
  *
  * 1. Passthrough: the PLC connects here (default :5020). The Interceptor
  *    opens its own connection to the field side (default 192.168.122.1:5021)
@@ -15,6 +15,9 @@
  * 5. Resource manager (QNX): the views are files any tool can read:
  *      cat /dev/interceptor/live | events | status | map | map.json   (root)
  * 6. Mapper: learns output -> result -> time chains from normal running.
+ * 7. Rules: timing drift, coil/contact mismatch, safety channel discrepancy,
+ *    slow safety response, broken chain -> alerts (/dev/interceptor/alerts).
+ * 8. Teach Mode: start / label / finish; taught map saved and reloaded.
  *
  * Outputs (on QNX):
  *   stdout                     every event as it happens
@@ -23,7 +26,7 @@
  *   /tmp/interceptor_events    copy of the timeline, 4x per second
  *
  * Build (in WSL):  bash deploy.sh
- * Run (on QNX):    ./interceptor [listen_port] [field_host] [field_port] [tap_port]
+ * Run (on QNX):    ./interceptor [listen_port] [field_host] [field_port] [tap_port] [cmd_port]
  */
 #include <stdio.h>
 #include <stdarg.h>
@@ -46,6 +49,8 @@
 #include "hrclock.h"
 #include "views.h"
 #include "mapper.h"
+#include "rules.h"
+#include "teach.h"
 
 #define MAX_PAIRS 8
 #define BUF_SIZE  4096
@@ -55,6 +60,13 @@ static char EVENTS_PATH[256] = "/tmp/interceptor_events";
 static char STATUS_PATH[256] = "/tmp/interceptor_status";
 static char MAP_PATH[256] = "/tmp/interceptor_map";
 static char MAPJSON_PATH[256] = "/tmp/interceptor_map.json";
+static char ALERTS_PATH[256] = "/tmp/interceptor_alerts";
+static char ALERTS_TMP[264];
+static char TEACH_PATH[256] = "/tmp/interceptor_teach";
+static char TEACH_TMP[264];
+/* Taught map: kept on the persistent disk so it survives a power cycle. */
+#define TEACH_SAVE_QNX   "/data/home/qnxuser/interceptor_map.json"
+#define TEACH_SAVE_OTHER "./interceptor_map_taught.json"
 static char LIVE_TMP[264], EVENTS_TMP[264], STATUS_TMP[264], MAP_TMP[264], MAPJSON_TMP[264];
 
 static void pick_output_dir(void)
@@ -65,7 +77,10 @@ static void pick_output_dir(void)
         snprintf(STATUS_PATH, sizeof STATUS_PATH, "./interceptor_status");
         snprintf(MAP_PATH, sizeof MAP_PATH, "./interceptor_map");
         snprintf(MAPJSON_PATH, sizeof MAPJSON_PATH, "./interceptor_map.json");
+        snprintf(ALERTS_PATH, sizeof ALERTS_PATH, "./interceptor_alerts");
     }
+    snprintf(ALERTS_TMP, sizeof ALERTS_TMP, "%s.tmp", ALERTS_PATH);
+    snprintf(TEACH_TMP, sizeof TEACH_TMP, "%s.tmp", TEACH_PATH);
     snprintf(MAP_TMP, sizeof MAP_TMP, "%s.tmp", MAP_PATH);
     snprintf(MAPJSON_TMP, sizeof MAPJSON_TMP, "%s.tmp", MAPJSON_PATH);
     snprintf(STATUS_TMP, sizeof STATUS_TMP, "%s.tmp", STATUS_PATH);
@@ -169,14 +184,17 @@ static void build_views(void)
         sb_printf(&b, "\n%s\n", title[t]);
         for (int i = 0; i < counts[t]; i++) {
             const char *nm = point_name((enum mb_table)t, i);
-            if (!mb.known[t][i])                 sb_printf(&b, "  %-20s   -\n", nm);
-            else if (t == MB_DI || t == MB_COIL) sb_printf(&b, "  %-20s %s\n", nm, mb.value[t][i] ? "ON" : " .");
-            else                                 sb_printf(&b, "  %-20s %6d\n", nm, mb.value[t][i]);
+            const char *lb = teach_label(nm);
+            if (!lb) lb = "";
+            if (!mb.known[t][i])                 sb_printf(&b, "  %-20s   -     %s\n", nm, lb);
+            else if (t == MB_DI || t == MB_COIL) sb_printf(&b, "  %-20s %s     %s\n", nm, mb.value[t][i] ? "ON" : " .", lb);
+            else                                 sb_printf(&b, "  %-20s %6d %s\n", nm, mb.value[t][i], lb);
         }
     }
     sb_printf(&b, "\nHARDWIRED TAPS (PLC can't see these)\n");
     for (int i = 0; i < taps.n; i++)
-        sb_printf(&b, "  %-20s %s\n", taps.name[i], taps.value[i] ? "ON" : " .");
+        sb_printf(&b, "  %-20s %s     %s\n", taps.name[i], taps.value[i] ? "ON" : " .",
+                  teach_label(taps.name[i]) ? teach_label(taps.name[i]) : "");
     sb_printf(&b, "\nTAPPED ANALOG\n");
     for (int i = 0; i < taps.na; i++)
         sb_printf(&b, "  %-20s %10.2f\n", taps.aname[i], taps.avalue[i]);
@@ -187,14 +205,14 @@ static void build_views(void)
     b = (struct sbuf){ vbuf, 0, sizeof vbuf };
     sb_printf(&b, "Interceptor event timeline (newest last)   seconds since start, clock %s\n", hr_source());
     int n = ev_recent(recent, 300);
-    char line[96];
+    char line[160];
     for (int i = 0; i < n; i++) { ev_format(&recent[i], line, sizeof line); sb_printf(&b, "%s\n", line); }
     views_set(VIEW_EVENTS, b.p, b.len);
     save_file(EVENTS_PATH, EVENTS_TMP, b.p, b.len);
 
     /* ---- status ---- */
     b = (struct sbuf){ vbuf, 0, sizeof vbuf };
-    sb_printf(&b, "Interceptor v4 status\n");
+    sb_printf(&b, "Interceptor v6 status\n");
     sb_printf(&b, "  mode            passthrough, read-and-log only (never drives an output)\n");
     sb_printf(&b, "  uptime          %llu s\n", up);
     sb_printf(&b, "  clock           %s\n", hr_source());
@@ -208,6 +226,8 @@ static void build_views(void)
     sb_printf(&b, "  taps            %lu packets (%lu digital, %lu analog frames), %d digital + %d analog channels, %lu bad\n",
               taps.packets, taps.digital_msgs, taps.analog_frames, taps.n, taps.na, taps.bad);
     sb_printf(&b, "  events          %llu total\n", (unsigned long long)ev_count());
+    sb_printf(&b, "  alerts          %lu\n", rules_alert_count());
+    sb_printf(&b, "  teach mode      %s   (map: %s)\n", teach_active() ? "LEARNING" : "off", teach_save_path());
     if (n > 0) { ev_format(&recent[n - 1], line, sizeof line); sb_printf(&b, "  last event      %s\n", line); }
     sb_printf(&b, "  /dev            %s\n", resmgr_msg);
     views_set(VIEW_STATUS, b.p, b.len);
@@ -220,6 +240,16 @@ static void build_views(void)
     ml = mapper_json(vbuf, sizeof vbuf);
     views_set(VIEW_MAPJSON, vbuf, ml);
     save_file(MAPJSON_PATH, MAPJSON_TMP, vbuf, ml);
+
+    /* ---- alerts ---- */
+    ml = rules_format(vbuf, sizeof vbuf);
+    views_set(VIEW_ALERTS, vbuf, ml);
+    save_file(ALERTS_PATH, ALERTS_TMP, vbuf, ml);
+
+    /* ---- teach ---- */
+    ml = teach_format(vbuf, sizeof vbuf);
+    views_set(VIEW_TEACH, vbuf, ml);
+    save_file(TEACH_PATH, TEACH_TMP, vbuf, ml);
 }
 
 static void set_nodelay(int fd)
@@ -290,6 +320,7 @@ int main(int argc, char **argv)
     const char *field_host = argc > 2 ? argv[2] : "192.168.122.1";
     int field_port = argc > 3 ? atoi(argv[3]) : 5021;
     int tap_port = argc > 4 ? atoi(argv[4]) : 6000;
+    int cmd_port = argc > 5 ? atoi(argv[5]) : 6002;
 
     signal(SIGINT, on_signal);
     signal(SIGTERM, on_signal);
@@ -301,27 +332,36 @@ int main(int argc, char **argv)
     mb_init(&mb, on_change);
     taps_init(&taps);
     mapper_init();
+    rules_init();
+    teach_init(access("/data/home/qnxuser", W_OK) == 0 ? TEACH_SAVE_QNX : TEACH_SAVE_OTHER);
 
     int ls = open_listen(listen_port);
     if (ls < 0) { perror("listen"); return 1; }
     int us = open_udp(tap_port);
     if (us < 0) { perror("tap port"); return 1; }
+    int cs = open_udp(cmd_port);      /* Teach Mode commands only; can't drive anything */
+    if (cs < 0) { perror("command port"); return 1; }
 
-    note("Interceptor v4 up. PLC side :%d -> field %s:%d. Taps on UDP :%d. Clock %s",
+    note("Interceptor v6 up. PLC side :%d -> field %s:%d. Taps on UDP :%d. Clock %s",
          listen_port, field_host, field_port, tap_port, hr_source());
     resmgr_start(resmgr_msg, sizeof resmgr_msg);
     note("/dev: %s", resmgr_msg);
     note("Also written to %s and %s", LIVE_PATH, EVENTS_PATH);
+    int loaded = teach_load();
+    if (loaded >= 0) note("Taught map loaded: %d motion baselines from %s", loaded, teach_save_path());
+    else note("No taught map yet (%s): baselines will come from the first cycles", teach_save_path());
+    note("Teach commands: echo start > /dev/interceptor/teach, or UDP :%d", cmd_port);
 
     long long last_live_ms = 0;
     char buf[BUF_SIZE + 1];
 
     while (running) {
-        struct pollfd pf[2 + 2 * MAX_PAIRS];
-        int map[2 + 2 * MAX_PAIRS];   /* -1 listen, -2 taps, else pair index */
+        struct pollfd pf[3 + 2 * MAX_PAIRS];
+        int map[3 + 2 * MAX_PAIRS];   /* -1 listen, -2 taps, -3 commands, else pair index */
         int n = 0;
         pf[n].fd = ls; pf[n].events = POLLIN; map[n++] = -1;
         pf[n].fd = us; pf[n].events = POLLIN; map[n++] = -2;
+        pf[n].fd = cs; pf[n].events = POLLIN; map[n++] = -3;
         for (int i = 0; i < MAX_PAIRS; i++) {
             if (pairs[i].plc < 0) continue;
             pf[n].fd = pairs[i].plc;   pf[n].events = POLLIN; map[n++] = i;
@@ -334,6 +374,11 @@ int main(int argc, char **argv)
         for (int k = 0; k < n && r > 0; k++) {
             if (!pf[k].revents) continue;
             r--;
+            if (map[k] == -3) {
+                ssize_t got = recv(cs, buf, BUF_SIZE, 0);
+                if (got > 0) { buf[got] = 0; views_push_cmd(buf); }
+                continue;
+            }
             if (map[k] == -2) {
                 ssize_t got = recv(us, buf, BUF_SIZE, 0);
                 if (got > 0) { buf[got] = 0; taps_feed(&taps, buf, (int)got); }
@@ -373,13 +418,17 @@ int main(int argc, char **argv)
         }
 
         long long now_ms = (long long)(ev_since_start_ns() / 1000000ULL);
+        char cmd[128];
+        while (views_pop_cmd(cmd, sizeof cmd)) { note("teach command: %s", cmd); teach_command(cmd); }
         mapper_tick(ev_since_start_ns());
+        rules_tick(ev_since_start_ns());
         if (now_ms - last_live_ms >= 250) { last_live_ms = now_ms; build_views(); }
     }
 
     for (int i = 0; i < MAX_PAIRS; i++) if (pairs[i].plc >= 0) close_pair(i, "shutdown");
     close(ls);
     close(us);
+    close(cs);
     build_views();
     note("Interceptor stopped");
     return 0;

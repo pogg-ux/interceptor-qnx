@@ -38,7 +38,16 @@ struct map_sample {
     char res[24]; int res_v; enum ev_src res_src;
     double ms, mean_ms, sd_ms;
     unsigned long n;
+    int trusted;            /* chain is established (see MAP_MIN_*) */
 };
+/* Called when an output edge's window ends without a result the chain
+ * always had (a broken chain: "output on, cylinder never moved"). */
+typedef void (*map_missing_cb)(const char *out, int out_v, const char *res, int res_v,
+                               double mean_ms, double waited_ms);
+void mapper_on_missing(map_missing_cb cb);
+/* Safety stop / control power off: open windows are discarded (a motion
+ * cut short by a safety is not a chain failure, and isn't counted). */
+void mapper_set_paused(int paused);
 int mapper_next_sample(struct map_sample *s);
 
 #endif

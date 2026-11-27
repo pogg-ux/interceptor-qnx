@@ -29,6 +29,7 @@ Interfaces
   - Modbus TCP slave for the PLC (default :5021)
   - Tap stream to the Interceptor, UDP JSON lines (default 127.0.0.1:6000):
       digital taps on change:  {"t": 12.345678, "tap": "T_CR1_COIL", "v": 1}
+      all digital taps once a second (snapshot, same format, one packet)
       analog frame every 20 ms: {"t": 12.34, "a": {"AMP_CMD_V": 7.5, ...}}
   - Control commands on UDP :6001 (see simctl.py)
 
@@ -71,7 +72,7 @@ HAZARDOUS = {"Y_CLAMP_CLOSE", "Y_PRESS_DOWN", "Y_CR2_INDEX", "Y_VFD_RUN",
 TAPS = ["T_ESTOP_A", "T_ESTOP_B", "T_SEL_POWER", "T_SEL_START", "T_ALL_OFF",
         "T_MCR_COIL", "T_MCR_CON", "T_CTRL_POWER",
         "T_GUARD_A", "T_GUARD_B", "T_SR1_K1", "T_SR1_K2",
-        "T_M1_COIL", "T_M1_SEAL", "T_PANIC", "T_PANIC_CUT",
+        "T_M1_COIL", "T_M1_SEAL", "T_M1_CON", "T_PANIC", "T_PANIC_CUT",
         "T_CR2_COIL", "T_CR2_CON", "T_CR3_COIL", "T_CR3_CON",
         "T_M2_COIL", "T_SSR_OUT", "T_LS_PRESS_UP_2",
         "T_MC_START", "T_MC_MANUAL", "T_MC_ENABLE_IN", "T_MC_READY",
@@ -135,6 +136,7 @@ class Machine:
         self.t0 = time.monotonic()
         self.taps = {name: None for name in TAPS}
         self.next_analog = 0.0
+        self.next_snapshot = 0.0
 
         # Operator panel (what a person sets). Panel starts powered up and
         # homed so the first demo is quick; use "estop" + "poweron" for the
@@ -193,6 +195,7 @@ class Machine:
         self.cr2 = Delay(NORMAL["relay_pick"], NORMAL["relay_drop"])
         self.cr3 = Delay(NORMAL["relay_pick"], NORMAL["relay_drop"])
         self.m1 = Delay(NORMAL["contactor_pick"], 0.030, True)
+        self.m1_welded = False
         self.m1_aux = Delay(0.010, 0.010, True)
         self.m2 = Delay(NORMAL["contactor_pick"], 0.030)
         self.guard_b_seen = Delay(0.0, 0.0, True)
@@ -201,6 +204,7 @@ class Machine:
         self.faults = {
             "F1_clamp_drift": 0.0,   # extra seconds on clamp close (grows by F1_rate/cycle)
             "F1_rate": 0.0,
+            "F2_m1_welded": False,   # pump contactor main contact welded shut
             "F3_guard_b_lag": 0.0,   # seconds guard channel B lags A
             "F4_sr1_slow": 0.0,      # seconds added to K1/K2 drop
             "F5_pump_wear": 0.0,     # 0..1 severity
@@ -243,6 +247,17 @@ class Machine:
             self.tap_sock.sendto(json.dumps(obj).encode() + b"\n", self.tap_addr)
         except OSError:
             pass
+
+    def tap_snapshot(self):
+        """Every tap's current state in one packet (like a tap input board's
+        periodic scan), so a listener that starts late still knows every state."""
+        t = round(self.now(), 6)
+        lines = [json.dumps({"t": t, "tap": n, "v": v}) for n, v in self.taps.items() if v is not None]
+        if lines:
+            try:
+                self.tap_sock.sendto(("\n".join(lines) + "\n").encode(), self.tap_addr)
+            except OSError:
+                pass
 
     def tap(self, name, val):
         val = 1 if val else 0
@@ -327,6 +342,14 @@ class Machine:
         seal = self.m1_aux.state and self.pump_sealed and not f["F17_seal_in_bad"]
         m1_coil = ctrl_power and bool(self.panel["OL_M1_OK"]) and ((start_pos and all_off) or seal)
         m1 = self.m1.update(m1_coil, now)
+        # F2: once welded while closed, the main contact stays closed no matter what the coil does
+        if f["F2_m1_welded"]:
+            if m1:
+                self.m1_welded = True
+            if self.m1_welded:
+                m1 = True
+        else:
+            self.m1_welded = False
         m1_aux = self.m1_aux.update(m1, now)
         self.pump_sealed = True
         pump = m1
@@ -521,6 +544,7 @@ class Machine:
         self.tap("T_SR1_K2", k2)
         self.tap("T_M1_COIL", m1_coil)
         self.tap("T_M1_SEAL", seal)
+        self.tap("T_M1_CON", m1)
         self.tap("T_PANIC", panic)
         self.tap("T_PANIC_CUT", panic and out_power)
         self.tap("T_CR2_COIL", cr2_coil)
@@ -536,6 +560,10 @@ class Machine:
         self.tap("T_MC_READY", mc_up)
         self.tap("T_AMP_ENABLE", amp_enable)
         self.tap("T_AMP_FAULT", amp_fault)
+
+        if now >= self.next_snapshot:
+            self.next_snapshot = now + 1.0
+            self.tap_snapshot()
 
         # ---------------- analog taps + owner-added sensors ----------------
         if now >= self.next_analog:

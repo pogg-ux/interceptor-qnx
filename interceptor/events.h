@@ -8,14 +8,15 @@
 #include <stdint.h>
 #include <stdio.h>
 
-enum ev_src { EV_IN, EV_OUT, EV_AO, EV_TAP, EV_NOTE };
+enum ev_src { EV_IN, EV_OUT, EV_AO, EV_TAP, EV_NOTE, EV_ALERT };
 
 struct event {
     uint64_t seq;
     uint64_t t_ns;          /* since Interceptor start */
     enum ev_src src;
-    char name[24];
+    char name[24];          /* for EV_ALERT: the rule code, e.g. "F1 timing" */
     int old_v, new_v;       /* old_v = -1: first value seen */
+    char text[72];          /* EV_ALERT only: short reason */
 };
 
 #define EV_RING 4096
@@ -23,6 +24,8 @@ struct event {
 void ev_init(void);
 /* Add an event; prints it to stdout too. */
 void ev_push(enum ev_src src, const char *name, int old_v, int new_v);
+/* Add an alert to the timeline. */
+void ev_alert(const char *code, const char *text);
 uint64_t ev_count(void);
 uint64_t ev_since_start_ns(void);
 /* Write the newest n events to f, oldest first. */

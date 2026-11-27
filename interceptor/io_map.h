@@ -30,6 +30,26 @@ static const char *const HR_NAMES[] = {
     "AO_VFD_SPEED", "AO_PROP_VALVE_UNUSED", "AO_HEAT_DUTY",
 };
 
+/* Hardwired relay/contactor coils and their contacts (taps). The contact
+ * must follow its coil; disagreement means a welded or stuck contact. */
+static const char *const COIL_CONTACT[][2] = {
+    { "T_MCR_COIL", "T_MCR_CON" },
+    { "T_M1_COIL",  "T_M1_CON"  },
+    { "T_CR2_COIL", "T_CR2_CON" },
+    { "T_CR3_COIL", "T_CR3_CON" },
+};
+/* Dual-channel safety signals. Both channels must agree. */
+static const char *const DUAL_CHANNEL[][2] = {
+    { "T_ESTOP_A", "T_ESTOP_B" },
+    { "T_GUARD_A", "T_GUARD_B" },
+    { "T_SR1_K1",  "T_SR1_K2"  },
+};
+/* Safety trips (tap goes off) and the safety contacts that must open after. */
+static const char *const SAFETY_TRIPS[] = { "T_ESTOP_A", "T_ESTOP_B", "T_GUARD_A", "T_GUARD_B" };
+static const char *const SAFETY_CONTACTS[] = { "T_SR1_K1", "T_SR1_K2" };
+/* All of these ON = the machine is allowed to move (power to the outputs). */
+static const char *const POWER_OK_TAPS[] = { "T_CTRL_POWER", "T_SR1_K1", "T_SR1_K2" };
+
 #define N_OF(a) ((int)(sizeof(a) / sizeof((a)[0])))
 
 #endif

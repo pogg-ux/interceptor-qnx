@@ -5,6 +5,9 @@
  *   /dev/interceptor/status   link health and counters
  *   /dev/interceptor/map      learned output -> result -> time chains
  *   /dev/interceptor/map.json same, machine-readable
+ *   /dev/interceptor/alerts   rule alerts + baselines
+ *   /dev/interceptor/teach    Teach Mode progress; WRITE commands here:
+ *                             echo start > /dev/interceptor/teach
  * Any QNX tool can read them:  cat /dev/interceptor/status
  *
  * Runs in its own thread with a standard dispatch loop, so a slow reader can
@@ -68,6 +71,26 @@ static int io_read(resmgr_context_t *ctp, io_read_t *msg, RESMGR_OCB_T *ocb)
     return _RESMGR_NPARTS(1);
 }
 
+/* Only /dev/interceptor/teach accepts writes: Teach Mode commands. */
+static int io_write(resmgr_context_t *ctp, io_write_t *msg, RESMGR_OCB_T *ocb)
+{
+    int status = iofunc_write_verify(ctp, msg, ocb, NULL);
+    if (status != EOK) return status;
+    if ((msg->i.xtype & _IO_XTYPE_MASK) != _IO_XTYPE_NONE) return ENOSYS;
+    if (which_view((iofunc_attr_t *)ocb->attr) != VIEW_TEACH) return EACCES;
+
+    size_t nbytes = _IO_WRITE_GET_NBYTES(msg);
+    char buf[512];
+    size_t n = nbytes < sizeof buf - 1 ? nbytes : sizeof buf - 1;
+    if (resmgr_msgread(ctp, buf, n, sizeof msg->i) == -1) return errno;
+    buf[n] = 0;
+    views_push_cmd(buf);
+
+    _IO_SET_WRITE_NBYTES(ctp, nbytes);
+    if (nbytes) ocb->attr->flags |= IOFUNC_ATTR_MTIME | IOFUNC_ATTR_CTIME;
+    return _RESMGR_NPARTS(0);
+}
+
 static void *resmgr_thread(void *arg)
 {
     (void)arg;
@@ -88,6 +111,7 @@ int resmgr_start(char *why, size_t why_len)
     }
     iofunc_func_init(_RESMGR_CONNECT_NFUNCS, &connect_funcs, _RESMGR_IO_NFUNCS, &io_funcs);
     io_funcs.read = io_read;
+    io_funcs.write = io_write;
 
     resmgr_attr_t rattr;
     memset(&rattr, 0, sizeof rattr);
@@ -97,7 +121,7 @@ int resmgr_start(char *why, size_t why_len)
     for (int i = 0; i < VIEW_N; i++) {
         char path[64];
         snprintf(path, sizeof path, "/dev/interceptor/%s", VIEW_NAMES[i]);
-        iofunc_attr_init(&attrs[i], S_IFREG | 0444, NULL, NULL);
+        iofunc_attr_init(&attrs[i], S_IFREG | (i == VIEW_TEACH ? 0666 : 0444), NULL, NULL);
         if (resmgr_attach(dpp, &rattr, path, _FTYPE_ANY, 0,
                           &connect_funcs, &io_funcs, &attrs[i]) == -1) {
             snprintf(why, why_len, "can't create %s (%s)%s", path, strerror(errno),
@@ -111,7 +135,7 @@ int resmgr_start(char *why, size_t why_len)
         snprintf(why, why_len, "pthread_create failed");
         return -1;
     }
-    snprintf(why, why_len, "/dev/interceptor/{live,events,status,map,map.json} ready");
+    snprintf(why, why_len, "/dev/interceptor/{live,events,status,map,map.json,alerts,teach} ready");
     return 0;
 }
 #endif

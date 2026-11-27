@@ -10,6 +10,7 @@
 struct result {
     char name[24]; int v; enum ev_src src;
     unsigned long seen;          /* windows it appeared in */
+    int established;             /* was trusted once: stays trusted */
     double mean, m2, min, max, last;   /* ms */
 };
 
@@ -20,6 +21,7 @@ struct out_edge {
     int nr;
     /* open window */
     int open;
+    int interrupted;             /* safety stop during this window */
     uint64_t t0;
     char got[MAX_RESULTS * 2][24];   /* points already recorded this window */
     int ngot;
@@ -43,6 +45,23 @@ static struct out_edge *find_edge(const char *name, int v, int create)
     e->v = v;
     return e;
 }
+
+static int trusted(const struct out_edge *oe, const struct result *r)
+{
+    if (r->established) return 1;
+    unsigned long w = oe->windows + (oe->open ? 1 : 0);
+    if (r->seen < MAP_MIN_SEEN || w == 0) return 0;
+    if ((double)r->seen / (double)w < MAP_MIN_RATE) return 0;
+    double sd = r->seen > 1 ? sqrt(r->m2 / (double)(r->seen - 1)) : 0.0;
+    if (sd <= 30.0 || sd <= 0.25 * r->mean) {     /* steady delay */
+        ((struct result *)r)->established = 1;
+        return 1;
+    }
+    return 0;
+}
+
+static map_missing_cb missing_cb;
+void mapper_on_missing(map_missing_cb cb) { missing_cb = cb; }
 
 static void add_sample(struct out_edge *oe, const struct event *ev, double ms)
 {
@@ -76,6 +95,7 @@ static void add_sample(struct out_edge *oe, const struct event *ev, double ms)
         s->ms = ms; s->mean_ms = r->mean;
         s->sd_ms = r->seen > 1 ? sqrt(r->m2 / (double)(r->seen - 1)) : 0.0;
         s->n = r->seen;
+        s->trusted = trusted(oe, r);
     }
 }
 
@@ -86,17 +106,38 @@ int mapper_next_sample(struct map_sample *s)
     return 1;
 }
 
-static void close_window(struct out_edge *oe)
+static int paused;
+void mapper_set_paused(int p)
+{
+    if (p && !paused)
+        for (int i = 0; i < nedges; i++) if (edges[i].open) edges[i].interrupted = 1;
+    paused = p;
+}
+
+static void close_window_at(struct out_edge *oe, uint64_t now_ns, int timed_out)
 {
     if (!oe->open) return;
     oe->open = 0;
+    if (oe->interrupted) return;           /* cut short by a safety: don't count */
+    /* Broken chain: only when the window ran its full time (the output
+     * stayed in this state), check every established result happened. */
+    if (timed_out && missing_cb) {
+        for (int k = 0; k < oe->nr; k++) {
+            const struct result *r = &oe->r[k];
+            if (!trusted(oe, r)) continue;
+            int got = 0;
+            for (int j = 0; j < oe->ngot; j++) if (strcmp(oe->got[j], r->name) == 0) { got = 1; break; }
+            if (!got) missing_cb(oe->name, oe->v, r->name, r->v, r->mean, (double)(now_ns - oe->t0) / 1e6);
+        }
+    }
     oe->windows++;
 }
+static void close_window(struct out_edge *oe) { close_window_at(oe, 0, 0); }
 
 void mapper_tick(uint64_t now_ns)
 {
     for (int i = 0; i < nedges; i++)
-        if (edges[i].open && now_ns - edges[i].t0 > MAP_WINDOW_NS) close_window(&edges[i]);
+        if (edges[i].open && now_ns - edges[i].t0 > MAP_WINDOW_NS) close_window_at(&edges[i], now_ns, 1);
 }
 
 void mapper_on_event(const struct event *ev)
@@ -110,6 +151,7 @@ void mapper_on_event(const struct event *ev)
         if (!oe) return;
         close_window(oe);
         oe->open = 1;
+        oe->interrupted = paused;
         oe->t0 = ev->t_ns;
         oe->ngot = 0;
         return;
@@ -123,14 +165,14 @@ void mapper_on_event(const struct event *ev)
     for (int i = 0; i < nedges; i++) {
         struct out_edge *oe = &edges[i];
         if (!oe->open) continue;
-        if (ev->t_ns - oe->t0 > MAP_WINDOW_NS) { close_window(oe); continue; }
+        if (ev->t_ns - oe->t0 > MAP_WINDOW_NS) { close_window_at(oe, ev->t_ns, 1); continue; }
         if (!any || oe->t0 > latest) latest = oe->t0;
         any = 1;
     }
     if (!any) return;
     for (int i = 0; i < nedges; i++) {
         struct out_edge *oe = &edges[i];
-        if (!oe->open || oe->t0 + 2000000ULL < latest) continue;
+        if (!oe->open || oe->interrupted || oe->t0 + 2000000ULL < latest) continue;
         int dup = 0;                               /* first change of each point only */
         for (int k = 0; k < oe->ngot; k++) if (strcmp(oe->got[k], ev->name) == 0) { dup = 1; break; }
         if (dup) continue;
@@ -139,14 +181,6 @@ void mapper_on_event(const struct event *ev)
     }
 }
 
-static int trusted(const struct out_edge *oe, const struct result *r)
-{
-    unsigned long w = oe->windows + (oe->open ? 1 : 0);
-    if (r->seen < MAP_MIN_SEEN || w == 0) return 0;
-    if ((double)r->seen / (double)w < MAP_MIN_RATE) return 0;
-    double sd = r->seen > 1 ? sqrt(r->m2 / (double)(r->seen - 1)) : 0.0;
-    return sd <= 30.0 || sd <= 0.25 * r->mean;    /* steady delay */
-}
 
 static int cmp_mean(const void *a, const void *b)
 {

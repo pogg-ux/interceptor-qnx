@@ -5,6 +5,8 @@
 #    -> machine reset + start -> live views.
 #  Usage:  bash ~/interceptor-qnx/start.sh          (machine starts cycling)
 #          bash ~/interceptor-qnx/start.sh idle     (machine left at READY)
+#          bash ~/interceptor-qnx/start.sh teach    (run the Teach Mode walkthrough
+#                                                    first, ~2.5 min, then cycle)
 #  Stop everything:  bash ~/interceptor-qnx/stop.sh
 #
 #  Screen layout (one window, 4 panes; click a pane to use it):
@@ -98,10 +100,16 @@ echo
 if ! (echo > /dev/tcp/127.0.0.1/502) 2>/dev/null; then
   say "PLC did not start. Last lines of $LOGS/openplc.log:"; tail -15 "$LOGS/openplc.log"; exit 1
 fi
-tmux send-keys -t $S:0.1 "cd $REPO/sim && python3 plc_watch.py 127.0.0.1 502" Enter
+if [ "$MODE" = "teach" ]; then
+  tmux send-keys -t $S:0.1 "cd $REPO/sim && python3 teach.py && python3 plc_watch.py 127.0.0.1 502" Enter
+else
+  tmux send-keys -t $S:0.1 "cd $REPO/sim && python3 plc_watch.py 127.0.0.1 502" Enter
+fi
 sleep 3   # let the PLC connect through the Interceptor
 
-if [ "$MODE" != "idle" ]; then
+if [ "$MODE" = "teach" ]; then
+  say "5/5 Teach Mode walkthrough running in the bottom-left pane (~2.5 min)"
+elif [ "$MODE" != "idle" ]; then
   say "5/5 Reset + start the machine"
   (cd "$REPO/sim" && python3 simctl.py press PB_RESET >/dev/null && sleep 2 && python3 simctl.py press PB_START >/dev/null) || true
 else

@@ -1,0 +1,77 @@
+# Point labels the teach script gives the Interceptor (POINT  label text).
+# In a real install the tech types these during the Teach walkthrough.
+SR1_OK            Guard safety relay OK
+PB_START          Cycle start pushbutton
+PB_STOP           Cycle stop pushbutton
+PB_RESET          Reset pushbutton
+SS_AUTO           Mode selector: auto
+SS_MANUAL         Mode selector: manual
+SS_SEMI           Mode selector: semi-auto
+PB_JOG_INDEX      Jog index pushbutton
+PB_SAFE_JOG       Safe jog pushbutton
+PX_TABLE_HOME     Index table home prox
+PX_PIN_LOCKED     Locating pin locked prox
+LS_CLAMP_OPEN     Clamp open limit
+LS_CLAMP_CLOSED   Clamp closed limit
+LS_PRESS_UP       Press up limit
+LS_PRESS_DOWN     Press down limit
+LS_EJECT_RET      Ejector retracted reed
+LS_EJECT_EXT      Ejector extended reed
+PE_PART_LOAD      Part present at load
+PE_PART_INFEED    Part present at infeed
+M1_AUX            Pump contactor aux contact
+PS_AIR_OK         Air pressure switch
+TS_OIL_OK         Oil temperature OK
+OL_M1_OK          Pump overload OK
+LUBE_LOW          Lube level low
+VFD_FAULT         Index drive fault
+PANIC_ACTIVE      Panic stop active
+SIM_PLC_POWERED   PLC powered
+SW_MAN_CLAMP      Manual clamp switch
+SW_MAN_CONV       Manual conveyor switch
+MC_READY          Motion controller ready
+Y_MC_ENABLE       Motion controller enable
+Y_PIN_RETRACT     Locating pin retract valve
+Y_CLAMP_CLOSE     Clamp close valve
+Y_CLAMP_OPEN      Clamp open valve
+Y_PRESS_DOWN      Press down command
+Y_PRESS_UP        Press up command
+Y_EJECT_EXT       Ejector extend valve
+Y_CR2_INDEX       Index relay CR2
+LT_RUN            Run light
+LT_FAULT          Fault light
+LT_READY          Ready light
+HORN              Horn
+Y_LUBE            Lube pump
+Y_VFD_RUN         Index drive run
+Y_CR3_HEAT        Heater relay CR3
+T_ESTOP_A         E-stop channel A
+T_ESTOP_B         E-stop channel B
+T_SEL_POWER       Power selector in POWER
+T_SEL_START       Power selector in START
+T_ALL_OFF         Manual switches all off
+T_MCR_COIL        Master control relay coil
+T_MCR_CON         Master control relay contact
+T_CTRL_POWER      Control power on
+T_GUARD_A         Guard switch channel A
+T_GUARD_B         Guard switch channel B
+T_SR1_K1          Safety relay contact K1
+T_SR1_K2          Safety relay contact K2
+T_M1_COIL         Pump contactor coil
+T_M1_SEAL         Pump seal-in contact
+T_M1_CON          Pump contactor main contact
+T_PANIC           Panic button
+T_PANIC_CUT       Panic cut active
+T_CR2_COIL        Index relay coil
+T_CR2_CON         Index relay contact
+T_CR3_COIL        Heater relay coil
+T_CR3_CON         Heater relay contact
+T_M2_COIL         Index motor contactor coil
+T_SSR_OUT         Heater SSR output
+T_LS_PRESS_UP_2   Press up limit (hardwired, 2nd switch)
+T_MC_START        Motion controller start input
+T_MC_MANUAL       Motion controller manual input
+T_MC_ENABLE_IN    Motion controller enable input
+T_MC_READY        Motion controller ready
+T_AMP_ENABLE      Valve amplifier enable
+T_AMP_FAULT       Valve amplifier fault

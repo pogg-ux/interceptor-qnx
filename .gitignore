@@ -3,3 +3,6 @@ __pycache__/
 hello/
 interceptor/interceptor
 logs/
+
+# local taught map (when not on QNX)
+interceptor/interceptor_map_taught.json
