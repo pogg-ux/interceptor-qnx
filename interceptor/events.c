@@ -4,6 +4,8 @@
 #include "rules.h"
 #include "teach.h"
 #include "io_map.h"
+#include "analog.h"
+#include "meters.h"
 #include <string.h>
 
 static struct event ring[EV_RING];
@@ -54,6 +56,8 @@ void ev_push(enum ev_src src, const char *name, int old_v, int new_v)
     mapper_on_event(e);
     rules_on_event(e);
     teach_on_event(e);
+    analog_on_event(e);
+    meters_on_event(e);
 }
 
 void ev_alert(const char *code, const char *text)

@@ -40,6 +40,8 @@ void rules_tick(uint64_t now_ns);
 /* Alerts so far, newest last, plus baselines in use. */
 size_t rules_format(char *out, size_t max);
 unsigned long rules_alert_count(void);
+/* Raise an alert from another module (analog rules). */
+void rules_raise(const char *code, const char *text);
 /* Teach Mode: set/replace a motion's baseline explicitly. */
 void rules_set_baseline(const char *out, int out_v, const char *res, int res_v,
                         double mean_ms, double sd_ms, unsigned long n);

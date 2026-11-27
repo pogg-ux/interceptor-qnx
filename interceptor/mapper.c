@@ -107,12 +107,13 @@ int mapper_next_sample(struct map_sample *s)
     return 1;
 }
 
-static int paused;
-void mapper_set_paused(int p)
+static int paused;          /* bitmask of PAUSE_* reasons */
+void mapper_set_paused(int reason, int on)
 {
-    if (p && !paused)
+    int was = paused;
+    paused = on ? (paused | reason) : (paused & ~reason);
+    if (paused && !was)
         for (int i = 0; i < nedges; i++) if (edges[i].open) edges[i].interrupted = 1;
-    paused = p;
 }
 
 /* Another output edge that is credited with the same result: an output the

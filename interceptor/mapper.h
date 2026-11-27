@@ -47,7 +47,9 @@ typedef void (*map_missing_cb)(const char *out, int out_v, const char *res, int 
 void mapper_on_missing(map_missing_cb cb);
 /* Safety stop / control power off: open windows are discarded (a motion
  * cut short by a safety is not a chain failure, and isn't counted). */
-void mapper_set_paused(int paused);
+#define PAUSE_SAFETY 1     /* safety stop / control power off */
+#define PAUSE_NO_PLC 2     /* PLC not connected: outputs frozen */
+void mapper_set_paused(int reason, int on);
 int mapper_next_sample(struct map_sample *s);
 
 #endif

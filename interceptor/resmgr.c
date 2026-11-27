@@ -8,6 +8,7 @@
  *   /dev/interceptor/alerts   rule alerts + baselines
  *   /dev/interceptor/teach    Teach Mode progress; WRITE commands here:
  *                             echo start > /dev/interceptor/teach
+ *   /dev/interceptor/meters   usage meters (pump hours, cycles, strokes...)
  * Any QNX tool can read them:  cat /dev/interceptor/status
  *
  * Runs in its own thread with a standard dispatch loop, so a slow reader can
@@ -135,7 +136,7 @@ int resmgr_start(char *why, size_t why_len)
         snprintf(why, why_len, "pthread_create failed");
         return -1;
     }
-    snprintf(why, why_len, "/dev/interceptor/{live,events,status,map,map.json,alerts,teach} ready");
+    snprintf(why, why_len, "/dev/interceptor/{live,events,status,map,map.json,alerts,teach,meters} ready");
     return 0;
 }
 #endif

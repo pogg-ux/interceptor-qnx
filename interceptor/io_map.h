@@ -64,6 +64,9 @@ static const char *const OPERATOR_INPUTS[] = {
  * so they don't bury the motion and safety events. */
 static const char *const QUIET_POINTS[] = { "T_SSR_OUT", "AO_HEAT_DUTY" };
 
+/* Encoder counter (ENC_COUNT) wraps at this many counts. */
+#define ENC_COUNTS_PER_REV 4000.0
+
 #define N_OF(a) ((int)(sizeof(a) / sizeof((a)[0])))
 
 #endif

@@ -1,6 +1,7 @@
 #include "teach.h"
 #include "mapper.h"
 #include "rules.h"
+#include "analog.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -71,7 +72,9 @@ static void save(void)
     int ns = rules_safety_baselines(sn, sm, 16);
     for (int i = 0; i < ns; i++)
         fprintf(f, "%s\n    {\"trip\": \"%s\", \"response_ms\": %.1f}", i ? "," : "", sn[i], sm[i]);
-    fprintf(f, "\n  ],\n  \"labels\": [");
+    fprintf(f, "\n  ],\n");
+    analog_save(f);
+    fprintf(f, "  \"labels\": [");
     for (int i = 0; i < nlabels; i++)
         fprintf(f, "%s\n    {\"point\": \"%s\", \"label\": \"%s\"}", i ? "," : "", labels[i].point, labels[i].label);
     fprintf(f, "\n  ],\n");
@@ -92,6 +95,7 @@ int teach_load(void)
         const char *p;
         if ((p = strstr(line, "\"taught_at\": \""))) sscanf(p + 14, "%31[^\"]", taught_at);
         if ((p = strstr(line, "\"safety_response_ms\": "))) safety_taught_ms = atof(p + 22);
+        analog_load_line(line);
         if ((p = strstr(line, "\"trip\": \""))) {
             double ms;
             if (sscanf(p, "\"trip\": \"%23[^\"]\", \"response_ms\": %lf", a, &ms) == 2) rules_set_safety_baseline_for(a, ms);
@@ -132,6 +136,7 @@ static void finish(void)
         }
     }
     safety_taught_ms = rules_finish_teach();
+    int na = analog_finish_teach();
     time_t now = time(NULL);
     struct tm tm;
     gmtime_r(&now, &tm);
@@ -140,7 +145,7 @@ static void finish(void)
     active = 0;
     save();
     char msg[72];
-    snprintf(msg, sizeof msg, "finished: %d chains, slowest safety %.0f ms, %d labels", n, safety_taught_ms, nlabels);
+    snprintf(msg, sizeof msg, "finished: %d chains, %d analog, safety %.0f ms, %d labels", n, na, safety_taught_ms, nlabels);
     ev_alert("TEACH", msg);
 }
 
@@ -153,6 +158,8 @@ void teach_command(const char *line)
         mapper_init();
         rules_reset_baselines();
         rules_set_teaching(1);
+        analog_reset_baselines();
+        analog_set_teaching(1);
         nseen = 0; trips = 0;
         t_start = ev_since_start_ns();
         active = 1;
@@ -167,6 +174,7 @@ void teach_command(const char *line)
     } else if (!strcmp(cmd, "cancel")) {
         active = 0;
         rules_set_teaching(0);
+        analog_set_teaching(0);
         teach_load();
         ev_alert("TEACH", "cancelled; previous map kept");
     } else if (cmd[0]) {

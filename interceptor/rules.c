@@ -1,6 +1,8 @@
 #include "rules.h"
 #include "mapper.h"
 #include "io_map.h"
+#include "blackbox.h"
+#include "analog.h"
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
@@ -25,8 +27,10 @@ static void raise_alert(const char *code, const char *fmt, ...)
     vsnprintf(a->text, sizeof a->text, fmt, ap);
     va_end(ap);
     ev_alert(code, a->text);
+    blackbox_freeze(code, a->text);
 }
 unsigned long rules_alert_count(void) { return nalerts; }
+void rules_raise(const char *code, const char *text) { raise_alert(code, "%s", text); }
 
 /* -------------------------------------------------------- timing (F1-type) */
 #define CHAIN_MAX 64
@@ -304,7 +308,7 @@ void rules_on_event(const struct event *e)
     tap_set(e->name, e->new_v, e->t_ns);
     if (e->old_v >= 0) safety_event(e);
     for (int i = 0; i < N_OF(POWER_OK_TAPS); i++)
-        if (!strcmp(e->name, POWER_OK_TAPS[i])) { mapper_set_paused(!power_ok_now()); break; }
+        if (!strcmp(e->name, POWER_OK_TAPS[i])) { mapper_set_paused(PAUSE_SAFETY, !power_ok_now()); break; }
 }
 
 void rules_tick(uint64_t now_ns)
@@ -335,6 +339,10 @@ size_t rules_format(char *out, size_t max)
         P("  %-16s %-3s -> %-18s %-3s base %7.1f ms  sd %5.1f  last %7.1f%s%s%s\n", c->out, onoff(c->out_v),
           c->res, onoff(c->res_v), c->base_mean, c->base_sd, c->last, c->from_teach ? "  (teach)" : "",
           c->warn_active ? "  << SLOW" : "", c->trend_active ? "  << TREND" : "");
+    }
+    {
+        size_t al = analog_format(out + len, max - len);
+        len += al;
     }
     P("\nSafety response baselines (trip -> both safety contacts open)\n");
     int any = 0;

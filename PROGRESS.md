@@ -14,7 +14,7 @@ Everything below runs on QNX 8.0 in QEMU on the EVO X2 and was verified there.
 | Wed Dec 2 | Mapper: output → result → time chains | ✅ learns chains with no PLC program access |
 | Thu Dec 3 | Teach Mode + teach script | ✅ 43 baselines, safety response, 75 labels; saved to VM disk, reloads at start |
 | Fri Dec 4 | Drift rules F1–F4 | ✅ all caught in simulator tests; **F1 caught on the real setup** (491 ms vs 395 ms baseline) |
-| Sat Dec 5 | F8 broken chain | ✅ (F5–F7 analog/count rules, black box, usage meters: still to do) |
+| Sat Dec 5 | F5–F7 + F10/F16/F18 analog rules, F8 broken chain, black box, usage meters | ✅ tested in the simulator; `/dev/interceptor/meters`, black box files in `/data/home/qnxuser/blackbox/` |
 | Tue Dec 1 | HMI proxy | ⏳ not started (first item on the cut list) |
 
 ### One-command start / stop
@@ -44,6 +44,16 @@ or `ssh qnxuser@192.168.122.158 cat /dev/interceptor/<view>`
 
 ### Next
 1. Re-teach with the latest code; test F2, F3, F4, F8 on the real setup.
-2. F5–F7 (analog curve shape, encoder count, heater duty), black-box freeze, usage meters.
+2. Verify F5–F7 + meters + black box on the real setup (re-teach first: analog baselines come from Teach).
 3. Live web view + desktop notifications (Dec 7).
 4. README / build steps / demo script / video (Dec 8–12). QNX submit target: Sun Dec 13.
+
+### More fault tests (analog/count rules)
+| Fault | Inject | Caught by |
+|---|---|---|
+| F5 pump wear | `fault F5_pump_wear 0.6` | vibration, pump current, peak pressure, rise time |
+| F6 encoder miscount | `fault F6_enc_drop 15` | counts per index |
+| F7 weak heater | `fault F7_heater_weak 0.4` | heater duty to hold temperature |
+| F10 coil going open | `fault F10_coil_open 0.3` | valve coil current |
+| F16 seal bypass | `fault F16_seal_bypass 0.4` | oil per press stroke |
+| F18 filter clogging | `fault F18_filter_rate 1.5` | filter pressure drop |

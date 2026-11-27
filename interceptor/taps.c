@@ -4,7 +4,19 @@
 #include <stdlib.h>
 #include <string.h>
 
+static void (*frame_cb)(void);
 void taps_init(struct tap_state *t) { memset(t, 0, sizeof *t); }
+void taps_on_analog_frame(void (*cb)(void)) { frame_cb = cb; }
+int taps_digital(const struct tap_state *t, const char *name, int *v)
+{
+    for (int i = 0; i < t->n; i++) if (!strcmp(t->name[i], name)) { *v = t->value[i]; return 1; }
+    return 0;
+}
+int taps_analog(const struct tap_state *t, const char *name, double *v)
+{
+    for (int i = 0; i < t->na; i++) if (!strcmp(t->aname[i], name)) { *v = t->avalue[i]; return 1; }
+    return 0;
+}
 
 /* Copy a "quoted" string starting at p (p points at the opening quote). */
 static const char *read_str(const char *p, const char *end, char *out, int outlen)
@@ -82,6 +94,7 @@ static void line(struct tap_state *t, const char *p, const char *end)
             } else q = num_end;
             analog(t, name, v);
         }
+        if (frame_cb) frame_cb();
         return;
     }
     t->bad++;
