@@ -36,6 +36,12 @@ if tmux has-session -t $S 2>/dev/null; then
   exec tmux attach -t $S
 fi
 
+if pgrep -f qemu-system >/dev/null; then
+  say "A QNX VM is already running outside the launcher (two VMs fight over one address)."
+  say "Run:  bash $REPO/stop.sh; pkill -f qemu-system   then start.sh again."
+  exit 1
+fi
+
 say "Asking for your Ubuntu password now (OpenPLC needs it for port 502)"
 sudo -v
 
@@ -68,6 +74,9 @@ for i in $(seq 1 90); do
 done
 echo
 if ! $SSH true 2>/dev/null; then
+  say "Diagnostics:"
+  ping -c 1 -W 1 $QNX_IP >/dev/null 2>&1 && echo "    ping $QNX_IP: OK" || echo "    ping $QNX_IP: NO ANSWER (VM still booting, or it got a different address)"
+  echo "    ssh says: $($SSH true 2>&1 | tail -1)"
   say "QNX did not answer over ssh. If it asks for a password, run: bash $REPO/interceptor/ssh_key.sh"
   say "Then: bash $REPO/stop.sh  and run start.sh again."
   exit 1
