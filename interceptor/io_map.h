@@ -50,6 +50,15 @@ static const char *const SAFETY_CONTACTS[] = { "T_SR1_K1", "T_SR1_K2" };
 /* All of these ON = the machine is allowed to move (power to the outputs). */
 static const char *const POWER_OK_TAPS[] = { "T_CTRL_POWER", "T_SR1_K1", "T_SR1_K2" };
 
+/* Operator controls: a person changes these, never a PLC output, so the
+ * mapper never treats them as the result of an output. */
+static const char *const OPERATOR_INPUTS[] = {
+    "PB_START", "PB_STOP", "PB_RESET", "PB_JOG_INDEX", "PB_SAFE_JOG",
+    "SS_AUTO", "SS_MANUAL", "SS_SEMI", "SW_MAN_CLAMP", "SW_MAN_CONV",
+    "T_ESTOP_A", "T_ESTOP_B", "T_SEL_POWER", "T_SEL_START", "T_ALL_OFF",
+    "T_PANIC", "T_GUARD_A", "T_GUARD_B", "T_MC_START", "T_MC_MANUAL",
+};
+
 /* Points that change constantly in normal running (heater pulse control).
  * Still shown in the live table, but kept off the event timeline and console
  * so they don't bury the motion and safety events. */

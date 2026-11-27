@@ -1,4 +1,5 @@
 #include "mapper.h"
+#include "io_map.h"
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
@@ -184,6 +185,8 @@ void mapper_on_event(const struct event *ev)
         return;
     }
     if (ev->src != EV_IN && ev->src != EV_TAP) return;
+    for (int i = 0; i < N_OF(OPERATOR_INPUTS); i++)      /* a person did that */
+        if (!strcmp(ev->name, OPERATOR_INPUTS[i])) return;
 
     /* Credit the result only to the NEAREST cause: the most recent output
      * edge (plus any that switched in the same instant, within 2 ms). */
