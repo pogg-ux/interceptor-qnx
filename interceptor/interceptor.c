@@ -7,7 +7,7 @@
  * It never creates, changes or drops traffic. v0 only counts what passes.
  *
  * Build (in WSL, after: source ~/qnx800/qnxsdp-env.sh):
- *   qcc -Vgcc_ntox86_64 -O2 -Wall interceptor.c -o interceptor
+ *   qcc -Vgcc_ntox86_64 -O2 -Wall interceptor.c -o interceptor -lsocket
  * Run (on QNX):
  *   ./interceptor [listen_port] [field_host] [field_port]
  */
