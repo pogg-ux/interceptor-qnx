@@ -14,7 +14,9 @@ tmux send-keys -t $S:0.1 C-c
 pkill -f gipc_sim.py 2>/dev/null
 sudo pkill -f webserver.py 2>/dev/null; sudo pkill -f core/openplc 2>/dev/null
 sleep 2
-echo "Shutting down the QNX VM..."
+echo "Stopping the Interceptor and shutting down the QNX VM..."
+tmux send-keys -t $S:0.0 C-c
+sleep 1
 tmux send-keys -t $S:0.0 C-a x
 sleep 2
 tmux kill-session -t $S 2>/dev/null

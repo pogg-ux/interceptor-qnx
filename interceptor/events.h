@@ -28,5 +28,7 @@ uint64_t ev_since_start_ns(void);
 /* Write the newest n events to f, oldest first. */
 void ev_dump(FILE *f, int n);
 void ev_format(const struct event *e, char *out, size_t len);
+/* Copy the newest n events (oldest first) into out[]; returns how many. */
+int ev_recent(struct event *out, int n);
 
 #endif

@@ -1,5 +1,5 @@
 /*
- * Interceptor v2 - for QNX 8.0.
+ * Interceptor v3 - for QNX 8.0.
  *
  * 1. Passthrough: the PLC connects here (default :5020). The Interceptor
  *    opens its own connection to the field side (default 192.168.122.1:5021)
@@ -12,10 +12,14 @@
  * 4. Timeline: every change from 2 and 3 goes into ONE event queue, stamped
  *    with ClockCycles() the moment the Interceptor sees it.
  *
+ * 5. Resource manager (QNX): the views are files any tool can read:
+ *      cat /dev/interceptor/live | events | status    (needs root to create)
+ *
  * Outputs (on QNX):
  *   stdout                     every event as it happens
- *   /tmp/interceptor_live      full I/O + tap table, 4x per second
- *   /tmp/interceptor_events    newest 300 events, 4x per second
+ *   /dev/interceptor/...         live table, event timeline, status
+ *   /tmp/interceptor_live      copy of the live table, 4x per second
+ *   /tmp/interceptor_events    copy of the timeline, 4x per second
  *
  * Build (in WSL):  bash deploy.sh
  * Run (on QNX):    ./interceptor [listen_port] [field_host] [field_port] [tap_port]
@@ -39,20 +43,24 @@
 #include "events.h"
 #include "taps.h"
 #include "hrclock.h"
+#include "views.h"
 
 #define MAX_PAIRS 8
 #define BUF_SIZE  4096
 /* Output files go in /tmp; if /tmp isn't writable, the current folder. */
 static char LIVE_PATH[256] = "/tmp/interceptor_live";
 static char EVENTS_PATH[256] = "/tmp/interceptor_events";
-static char LIVE_TMP[264], EVENTS_TMP[264];
+static char STATUS_PATH[256] = "/tmp/interceptor_status";
+static char LIVE_TMP[264], EVENTS_TMP[264], STATUS_TMP[264];
 
 static void pick_output_dir(void)
 {
     if (access("/tmp", W_OK) != 0) {
         snprintf(LIVE_PATH, sizeof LIVE_PATH, "./interceptor_live");
         snprintf(EVENTS_PATH, sizeof EVENTS_PATH, "./interceptor_events");
+        snprintf(STATUS_PATH, sizeof STATUS_PATH, "./interceptor_status");
     }
+    snprintf(STATUS_TMP, sizeof STATUS_TMP, "%s.tmp", STATUS_PATH);
     snprintf(LIVE_TMP, sizeof LIVE_TMP, "%s.tmp", LIVE_PATH);
     snprintf(EVENTS_TMP, sizeof EVENTS_TMP, "%s.tmp", EVENTS_PATH);
 }
@@ -102,42 +110,100 @@ static void on_change(enum mb_table t, int i, int old_v, int new_v)
     ev_push(src, point_name(t, i), old_v, new_v);
 }
 
-static void write_live(void)
+/* Small string builder for the views. */
+struct sbuf { char *p; size_t len, max; };
+static void sb_printf(struct sbuf *b, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
+static void sb_printf(struct sbuf *b, const char *fmt, ...)
 {
-    FILE *f = fopen(LIVE_TMP, "w");
-    if (!f) return;
-    unsigned long long up = ev_since_start_ns() / 1000000000ULL;
-    fprintf(f, "Interceptor live   up %llus   events %llu   clock %s\n",
-            up, (unsigned long long)ev_count(), hr_source());
-    fprintf(f, "Modbus  %lu req / %lu rsp  exc %lu  bad %lu      Taps  %lu pkts  bad %lu\n",
-            mb.frames_req, mb.frames_rsp, mb.exceptions, mb.bad_frames, taps.packets, taps.bad);
+    if (b->len >= b->max) return;
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(b->p + b->len, b->max - b->len, fmt, ap);
+    va_end(ap);
+    if (n > 0) b->len += (size_t)n < b->max - b->len ? (size_t)n : b->max - b->len - 1;
+}
 
+static void save_file(const char *path, const char *tmp, const char *text, size_t len)
+{
+    FILE *f = fopen(tmp, "w");
+    if (!f) return;
+    fwrite(text, 1, len, f);
+    fclose(f);
+    rename(tmp, path);
+}
+
+static int links_open(void)
+{
+    int n = 0;
+    for (int i = 0; i < MAX_PAIRS; i++) if (pairs[i].plc >= 0) n++;
+    return n;
+}
+
+static char vbuf[VIEW_MAX];
+static struct event recent[300];
+static char resmgr_msg[160];
+static unsigned long links_opened;
+
+static void build_views(void)
+{
+    struct sbuf b;
+    unsigned long long up = ev_since_start_ns() / 1000000000ULL;
+
+    /* ---- live ---- */
+    b = (struct sbuf){ vbuf, 0, sizeof vbuf };
+    sb_printf(&b, "Interceptor live   up %llus   events %llu   clock %s\n",
+              up, (unsigned long long)ev_count(), hr_source());
+    sb_printf(&b, "Modbus  %lu req / %lu rsp  exc %lu  bad %lu      Taps  %lu pkts  bad %lu\n",
+              mb.frames_req, mb.frames_rsp, mb.exceptions, mb.bad_frames, taps.packets, taps.bad);
     static const char *title[] = { "INPUTS (PLC reads)", "OUTPUTS (PLC writes)", "ANALOG IN", "ANALOG OUT" };
     int counts[] = { N_OF(DI_NAMES), N_OF(COIL_NAMES), N_OF(IR_NAMES), N_OF(HR_NAMES) };
     for (int t = 0; t < 4; t++) {
-        fprintf(f, "\n%s\n", title[t]);
+        sb_printf(&b, "\n%s\n", title[t]);
         for (int i = 0; i < counts[t]; i++) {
             const char *nm = point_name((enum mb_table)t, i);
-            if (!mb.known[t][i])                fprintf(f, "  %-20s   -\n", nm);
-            else if (t == MB_DI || t == MB_COIL) fprintf(f, "  %-20s %s\n", nm, mb.value[t][i] ? "ON" : " .");
-            else                                fprintf(f, "  %-20s %6d\n", nm, mb.value[t][i]);
+            if (!mb.known[t][i])                 sb_printf(&b, "  %-20s   -\n", nm);
+            else if (t == MB_DI || t == MB_COIL) sb_printf(&b, "  %-20s %s\n", nm, mb.value[t][i] ? "ON" : " .");
+            else                                 sb_printf(&b, "  %-20s %6d\n", nm, mb.value[t][i]);
         }
     }
-    fprintf(f, "\nHARDWIRED TAPS (PLC can't see these)\n");
+    sb_printf(&b, "\nHARDWIRED TAPS (PLC can't see these)\n");
     for (int i = 0; i < taps.n; i++)
-        fprintf(f, "  %-20s %s\n", taps.name[i], taps.value[i] ? "ON" : " .");
-    fprintf(f, "\nTAPPED ANALOG\n");
+        sb_printf(&b, "  %-20s %s\n", taps.name[i], taps.value[i] ? "ON" : " .");
+    sb_printf(&b, "\nTAPPED ANALOG\n");
     for (int i = 0; i < taps.na; i++)
-        fprintf(f, "  %-20s %10.2f\n", taps.aname[i], taps.avalue[i]);
-    fclose(f);
-    rename(LIVE_TMP, LIVE_PATH);
+        sb_printf(&b, "  %-20s %10.2f\n", taps.aname[i], taps.avalue[i]);
+    views_set(VIEW_LIVE, b.p, b.len);
+    save_file(LIVE_PATH, LIVE_TMP, b.p, b.len);
 
-    f = fopen(EVENTS_TMP, "w");
-    if (!f) return;
-    fprintf(f, "Interceptor event timeline (newest last)   seconds since start, clock %s\n", hr_source());
-    ev_dump(f, 300);
-    fclose(f);
-    rename(EVENTS_TMP, EVENTS_PATH);
+    /* ---- events ---- */
+    b = (struct sbuf){ vbuf, 0, sizeof vbuf };
+    sb_printf(&b, "Interceptor event timeline (newest last)   seconds since start, clock %s\n", hr_source());
+    int n = ev_recent(recent, 300);
+    char line[96];
+    for (int i = 0; i < n; i++) { ev_format(&recent[i], line, sizeof line); sb_printf(&b, "%s\n", line); }
+    views_set(VIEW_EVENTS, b.p, b.len);
+    save_file(EVENTS_PATH, EVENTS_TMP, b.p, b.len);
+
+    /* ---- status ---- */
+    b = (struct sbuf){ vbuf, 0, sizeof vbuf };
+    sb_printf(&b, "Interceptor v3 status\n");
+    sb_printf(&b, "  mode            passthrough, read-and-log only (never drives an output)\n");
+    sb_printf(&b, "  uptime          %llu s\n", up);
+    sb_printf(&b, "  clock           %s\n", hr_source());
+    sb_printf(&b, "  PLC links       %d open (%lu opened since start)\n", links_open(), links_opened);
+    for (int i = 0; i < MAX_PAIRS; i++)
+        if (pairs[i].plc >= 0)
+            sb_printf(&b, "  link %d          PLC->field %llu bytes, field->PLC %llu bytes\n",
+                      i, pairs[i].to_field, pairs[i].to_plc);
+    sb_printf(&b, "  modbus frames   %lu requests, %lu replies, %lu exceptions, %lu bad\n",
+              mb.frames_req, mb.frames_rsp, mb.exceptions, mb.bad_frames);
+    sb_printf(&b, "  taps            %lu packets (%lu digital, %lu analog frames), %d digital + %d analog channels, %lu bad\n",
+              taps.packets, taps.digital_msgs, taps.analog_frames, taps.n, taps.na, taps.bad);
+    sb_printf(&b, "  events          %llu total\n", (unsigned long long)ev_count());
+    if (n > 0) { ev_format(&recent[n - 1], line, sizeof line); sb_printf(&b, "  last event      %s\n", line); }
+    sb_printf(&b, "  /dev            %s\n", resmgr_msg);
+    views_set(VIEW_STATUS, b.p, b.len);
+    save_file(STATUS_PATH, STATUS_TMP, b.p, b.len);
 }
 
 static void set_nodelay(int fd)
@@ -224,9 +290,11 @@ int main(int argc, char **argv)
     int us = open_udp(tap_port);
     if (us < 0) { perror("tap port"); return 1; }
 
-    note("Interceptor v2 up. PLC side :%d -> field %s:%d. Taps on UDP :%d. Clock %s",
+    note("Interceptor v3 up. PLC side :%d -> field %s:%d. Taps on UDP :%d. Clock %s",
          listen_port, field_host, field_port, tap_port, hr_source());
-    note("Live table: %s   Timeline: %s", LIVE_PATH, EVENTS_PATH);
+    resmgr_start(resmgr_msg, sizeof resmgr_msg);
+    note("/dev: %s", resmgr_msg);
+    note("Also written to %s and %s", LIVE_PATH, EVENTS_PATH);
 
     long long last_live_ms = 0;
     char buf[BUF_SIZE + 1];
@@ -270,6 +338,7 @@ int main(int argc, char **argv)
                 pairs[slot].plc = c;
                 pairs[slot].field = f;
                 mb_reset_streams(&mb);
+                links_opened++;
                 note("link %d open: PLC <-> Interceptor <-> field", slot);
                 continue;
             }
@@ -287,13 +356,13 @@ int main(int argc, char **argv)
         }
 
         long long now_ms = (long long)(ev_since_start_ns() / 1000000ULL);
-        if (now_ms - last_live_ms >= 250) { last_live_ms = now_ms; write_live(); }
+        if (now_ms - last_live_ms >= 250) { last_live_ms = now_ms; build_views(); }
     }
 
     for (int i = 0; i < MAX_PAIRS; i++) if (pairs[i].plc >= 0) close_pair(i, "shutdown");
     close(ls);
     close(us);
-    write_live();
+    build_views();
     note("Interceptor stopped");
     return 0;
 }

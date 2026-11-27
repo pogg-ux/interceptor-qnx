@@ -49,3 +49,11 @@ void ev_dump(FILE *f, int n)
         fprintf(f, "%s\n", line);
     }
 }
+
+int ev_recent(struct event *out, int n)
+{
+    uint64_t have = seq < EV_RING ? seq : EV_RING;
+    if ((uint64_t)n > have) n = (int)have;
+    for (int i = 0; i < n; i++) out[i] = ring[(seq - n + i) % EV_RING];
+    return n;
+}

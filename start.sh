@@ -9,9 +9,13 @@
 #
 #  Screen layout (one window, 4 panes; click a pane to use it):
 #    +---------------------+---------------------+
-#    | QNX console         | Interceptor events  |
+#    | QNX console (root): | Event timeline      |
+#    |  Interceptor runs   |  /dev/interceptor/  |
+#    |  here, logs events  |       events        |
 #    +---------------------+---------------------+
-#    | PLC + simulator     | Live I/O table      |
+#    | PLC state           | Live I/O table      |
+#    |                     |  /dev/interceptor/  |
+#    |                     |       live          |
 #    +---------------------+---------------------+
 # =====================================================================
 set -e
@@ -49,10 +53,10 @@ tmux split-window -h -t $S:0.0
 tmux split-window -v -t $S:0.0
 tmux split-window -v -t $S:0.2
 # panes: 0 = top-left, 1 = bottom-left, 2 = top-right, 3 = bottom-right
-tmux select-pane -t $S:0.0 -T "QNX console"
-tmux select-pane -t $S:0.1 -T "PLC + simulator"
-tmux select-pane -t $S:0.2 -T "Interceptor events (on QNX)"
-tmux select-pane -t $S:0.3 -T "Live I/O table"
+tmux select-pane -t $S:0.0 -T "QNX console (root) - Interceptor"
+tmux select-pane -t $S:0.1 -T "PLC state"
+tmux select-pane -t $S:0.2 -T "Event timeline  /dev/interceptor/events"
+tmux select-pane -t $S:0.3 -T "Live I/O  /dev/interceptor/live"
 tmux send-keys -t $S:0.0 "source ~/qnx800/qnxsdp-env.sh >/dev/null && cd ~/qnxvm && mkqnximage --type=qemu --arch=x86_64 --run" Enter
 
 printf "    waiting for QNX to answer"
@@ -70,9 +74,11 @@ fi
 say "2/5 Building + copying the Interceptor to QNX"
 bash "$REPO/interceptor/deploy.sh" | tail -1
 
-say "3/5 Starting the Interceptor on QNX"
-tmux send-keys -t $S:0.2 "ssh -t qnxuser@$QNX_IP ./interceptor" Enter
+say "3/5 Starting the Interceptor on QNX (as root, so it can create /dev/interceptor)"
+tmux send-keys -t $S:0.0 "" Enter
 sleep 1
+tmux send-keys -t $S:0.0 "/data/home/qnxuser/interceptor" Enter
+sleep 2
 
 say "4/5 Starting OpenPLC + simulator (taps go to QNX)"
 OPLC="${OPENPLC_DIR:-$HOME/OpenPLC_v3}"
@@ -102,8 +108,9 @@ else
   say "5/5 Machine left idle (press PB_RESET / PB_START with simctl when ready)"
 fi
 
+tmux send-keys -t $S:0.2 "bash $REPO/interceptor/live.sh events" Enter
 tmux send-keys -t $S:0.3 "bash $REPO/interceptor/live.sh" Enter
-tmux select-pane -t $S:0.2
+tmux select-pane -t $S:0.0
 say "Ready. Opening the 4-pane view. Click a pane to use it. Stop everything: bash ~/interceptor-qnx/stop.sh"
 sleep 1
 exec tmux attach -t $S
