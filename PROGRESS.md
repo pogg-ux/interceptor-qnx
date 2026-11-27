@@ -25,6 +25,9 @@ bash ~/interceptor-qnx/stop.sh
 ```
 The launcher repairs the VM network (stale `virbr0` after WSL restarts) and refuses to start a second VM.
 
+### Dashboard
+Open **http://localhost:8090** in Chrome/Edge while start.sh is running. Click *Enable desktop alerts*; install it as an app from the browser menu if you like. Served read-only by the Interceptor on QNX (:8081), forwarded by `interceptor/webview.py`.
+
 ### Views (from any WSL window)
 `bash ~/interceptor-qnx/interceptor/live.sh [live|events|status|map|alerts|teach]`
 or `ssh qnxuser@192.168.122.158 cat /dev/interceptor/<view>`
@@ -45,7 +48,7 @@ or `ssh qnxuser@192.168.122.158 cat /dev/interceptor/<view>`
 ### Next
 1. Re-teach with the latest code; test F2, F3, F4, F8 on the real setup.
 2. Verify F5–F7 + meters + black box on the real setup (re-teach first: analog baselines come from Teach).
-3. Live web view + desktop notifications (Dec 7).
+3. ~~Live web view + desktop notifications (Dec 7)~~ done: `http://localhost:8090` (verify on the real setup).
 4. README / build steps / demo script / video (Dec 8–12). QNX submit target: Sun Dec 13.
 
 ### More fault tests (analog/count rules)

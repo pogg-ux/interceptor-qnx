@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Interceptor</title>
+<link rel="manifest" href="/manifest.json">
+<meta name="theme-color" content="#0f1417">
+<style>
+  :root { --bg:#0f1417; --panel:#161d21; --line:#253038; --text:#d7e0e5; --dim:#7d8b93;
+          --on:#3ecf8e; --alert:#ff5a4e; --warn:#f2b441; --accent:#4fb3ff; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:14px/1.4 ui-monospace, "Cascadia Mono", Consolas, monospace; }
+  header { display:flex; gap:24px; align-items:center; padding:12px 18px; border-bottom:1px solid var(--line); flex-wrap:wrap; }
+  header h1 { font-size:16px; margin:0; letter-spacing:.08em; }
+  header h1 span { color:var(--dim); font-weight:normal; letter-spacing:0; }
+  .stat { color:var(--dim); } .stat b { color:var(--text); font-weight:600; }
+  .dot { display:inline-block; width:9px; height:9px; border-radius:50%; background:var(--dim); margin-right:6px; }
+  .dot.ok { background:var(--on); box-shadow:0 0 8px var(--on); } .dot.bad { background:var(--alert); }
+  button { background:var(--panel); color:var(--text); border:1px solid var(--line); padding:6px 10px; border-radius:6px; cursor:pointer; font:inherit; }
+  button:hover { border-color:var(--accent); }
+  main { display:grid; grid-template-columns: 1.2fr 1fr 0.9fr; gap:14px; padding:14px 18px; }
+  section { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:12px 14px; min-height:120px; overflow:hidden; }
+  section h2 { font-size:12px; text-transform:uppercase; letter-spacing:.1em; color:var(--dim); margin:0 0 10px; font-weight:600; }
+  #alerts .a { border-left:3px solid var(--alert); padding:6px 10px; margin-bottom:8px; background:#1d1416; border-radius:0 6px 6px 0; }
+  #alerts .a .code { color:var(--alert); font-weight:700; }
+  #alerts .a .t { color:var(--dim); float:right; }
+  #alerts .none { color:var(--on); }
+  #events { white-space:pre; font-size:12.5px; max-height:520px; overflow:auto; }
+  .ev-OUT { color:var(--accent); } .ev-IN { color:var(--text); } .ev-TAP { color:#c792ea; } .ev-ALERT { color:var(--alert); font-weight:700; } .ev-NOTE { color:var(--dim); }
+  .io { display:grid; grid-template-columns: 1fr auto; column-gap:10px; font-size:12.5px; }
+  .io .n { color:var(--dim); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; } .io .v { text-align:right; }
+  .io .v.on { color:var(--on); font-weight:700; }
+  .io h3 { grid-column:1/-1; font-size:11px; color:var(--warn); margin:10px 0 4px; letter-spacing:.08em; }
+  #meters, #baselines { white-space:pre; font-size:12px; color:var(--text); overflow:auto; }
+  .wide { grid-column: 1 / span 2; }
+  footer { color:var(--dim); padding:4px 18px 16px; font-size:12px; }
+  @media (max-width: 1100px) { main { grid-template-columns:1fr; } .wide { grid-column:auto; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>INTERCEPTOR <span>passive machine monitor · QNX 8.0</span></h1>
+  <div class="stat"><span id="linkdot" class="dot"></span>PLC link <b id="link">?</b></div>
+  <div class="stat">uptime <b id="uptime">-</b></div>
+  <div class="stat">events <b id="evcount">-</b></div>
+  <div class="stat">alerts <b id="alcount">-</b></div>
+  <div class="stat">teach <b id="teach">-</b></div>
+  <div style="margin-left:auto"><button id="notify">Enable desktop alerts</button></div>
+</header>
+<main>
+  <section><h2>Alerts</h2><div id="alerts"></div></section>
+  <section><h2>Event timeline (newest first)</h2><div id="events"></div></section>
+  <section><h2>Live I/O and taps</h2><div id="io" class="io"></div></section>
+  <section class="wide"><h2>Learned baselines</h2><div id="baselines"></div></section>
+  <section><h2>Usage meters</h2><div id="meters"></div></section>
+</main>
+<footer>Read-and-log only: the Interceptor never drives an output. Data from /dev/interceptor on QNX, refreshed every second.</footer>
+<script>
+const $ = id => document.getElementById(id);
+const get = v => fetch('/api/' + v, {cache:'no-store'}).then(r => r.ok ? r.text() : Promise.reject(r.status));
+let lastAlerts = -1;
+
+$('notify').onclick = async () => {
+  if (!('Notification' in window)) return alert('This browser has no desktop notifications.');
+  const p = await Notification.requestPermission();
+  $('notify').textContent = p === 'granted' ? 'Desktop alerts on' : 'Desktop alerts blocked';
+};
+if ('Notification' in window && Notification.permission === 'granted') $('notify').textContent = 'Desktop alerts on';
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
+
+function esc(s) { return s.replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
+
+function renderStatus(t) {
+  const m = (re) => (t.match(re) || [,'?'])[1];
+  const links = m(/PLC links\s+(\d+) open/);
+  $('link').textContent = links === '1' ? 'connected' : links + ' open';
+  $('linkdot').className = 'dot ' + (links !== '0' && links !== '?' ? 'ok' : 'bad');
+  const up = parseInt(m(/uptime\s+(\d+)/)) || 0;
+  $('uptime').textContent = up >= 3600 ? (up/3600).toFixed(1)+' h' : up >= 60 ? Math.floor(up/60)+' min' : up+' s';
+  $('evcount').textContent = m(/events\s+(\d+)/);
+  $('teach').textContent = m(/teach mode\s+(\S+)/);
+}
+
+function renderAlerts(t) {
+  const lines = t.split('\n');
+  const total = parseInt((lines[0].match(/(\d+) total/) || [,0])[1]);
+  $('alcount').textContent = total;
+  const items = [];
+  for (const l of lines.slice(1)) {
+    if (!l.trim()) break;
+    const mm = l.match(/^\s*([\d.]+)\s+(\S+(?: \S+)?(?: \S+)?)\s{2,}(.*)$/);
+    if (mm) items.push(mm);
+  }
+  $('alerts').innerHTML = items.length
+    ? items.reverse().slice(0, 12).map(a => `<div class="a"><span class="t">${(+a[1]).toFixed(1)} s</span><span class="code">${esc(a[2])}</span><br>${esc(a[3])}</div>`).join('')
+    : '<div class="none">No alerts. Machine matches its baseline.</div>';
+  if (lastAlerts >= 0 && total > lastAlerts && items.length && 'Notification' in window && Notification.permission === 'granted') {
+    const a = items[0];
+    new Notification('Interceptor: ' + a[2], { body: a[3], tag: 'interceptor-' + total });
+  }
+  lastAlerts = total;
+  const b = t.indexOf('\nBaselines');
+  $('baselines').textContent = b >= 0 ? t.slice(b + 1) : '';
+}
+
+function renderEvents(t) {
+  const lines = t.split('\n').slice(1).filter(Boolean).reverse().slice(0, 80);
+  $('events').innerHTML = lines.map(l => {
+    const k = /!! ALERT/.test(l) ? 'ALERT' : / OUT /.test(l) ? 'OUT' : / TAP /.test(l) ? 'TAP' : / -- /.test(l) ? 'NOTE' : 'IN';
+    return `<div class="ev-${k}">${esc(l)}</div>`;
+  }).join('');
+}
+
+function renderLive(t) {
+  let html = '';
+  for (const l of t.split('\n').slice(2)) {
+    if (!l.trim()) continue;
+    if (!l.startsWith(' ')) { html += `<h3>${esc(l)}</h3>`; continue; }
+    const mm = l.match(/^\s+(\S+)\s+(ON|\.|-|-?[\d.]+)\s*(.*)$/);
+    if (!mm) continue;
+    const on = mm[2] === 'ON';
+    const name = mm[3] ? `${mm[1]} <span style="opacity:.6">${esc(mm[3])}</span>` : mm[1];
+    html += `<div class="n" title="${esc(mm[3] || '')}">${name}</div><div class="v ${on ? 'on' : ''}">${mm[2] === '.' ? '·' : esc(mm[2])}</div>`;
+  }
+  $('io').innerHTML = html;
+}
+
+async function tick() {
+  try {
+    const [st, al, ev, lv, me] = await Promise.all(['status','alerts','events','live','meters'].map(get));
+    renderStatus(st); renderAlerts(al); renderEvents(ev); renderLive(lv);
+    $('meters').textContent = me.split('\n').slice(2).join('\n');
+  } catch (e) {
+    $('link').textContent = 'Interceptor not reachable';
+    $('linkdot').className = 'dot bad';
+  }
+}
+tick();
+setInterval(tick, 1000);
+</script>
+</body>
+</html>

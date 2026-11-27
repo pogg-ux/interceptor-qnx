@@ -133,9 +133,12 @@ else
   say "5/5 Machine left idle (press PB_RESET / PB_START with simctl when ready)"
 fi
 
+pkill -f webview.py 2>/dev/null || true
+(nohup python3 "$REPO/interceptor/webview.py" --qnx "$QNX_IP" > "$LOGS/webview.log" 2>&1 &)
 tmux send-keys -t $S:0.2 "bash $REPO/interceptor/live.sh events" Enter
 tmux send-keys -t $S:0.3 "bash $REPO/interceptor/live.sh" Enter
 tmux select-pane -t $S:0.0
+say "Dashboard: open  http://localhost:8090  in Chrome or Edge (click 'Enable desktop alerts')"
 say "Ready. Opening the 4-pane view. Click a pane to use it. Stop everything: bash ~/interceptor-qnx/stop.sh"
 sleep 1
 exec tmux attach -t $S

@@ -20,6 +20,7 @@
  * 8. Teach Mode: start / label / finish; taught map saved and reloaded.
  * 9. Analog/count rules (F5-F7, F10, F16, F18), black box freeze on every
  *    alert, usage meters kept on disk (/dev/interceptor/meters).
+ * 10. Read-only web dashboard on :8081 (GET only) with desktop alerts.
  *
  * Outputs (on QNX):
  *   stdout                     every event as it happens
@@ -28,7 +29,7 @@
  *   /tmp/interceptor_events    copy of the timeline, 4x per second
  *
  * Build (in WSL):  bash deploy.sh
- * Run (on QNX):    ./interceptor [listen_port] [field_host] [field_port] [tap_port] [cmd_port]
+ * Run (on QNX):    ./interceptor [listen_port] [field_host] [field_port] [tap_port] [cmd_port] [web_port]
  */
 #include <stdio.h>
 #include <stdarg.h>
@@ -57,6 +58,7 @@
 #include "meters.h"
 #include "blackbox.h"
 #include "points.h"
+#include "httpd.h"
 
 #define MAX_PAIRS 8
 #define BUF_SIZE  4096
@@ -362,6 +364,7 @@ int main(int argc, char **argv)
     int field_port = argc > 3 ? atoi(argv[3]) : 5021;
     int tap_port = argc > 4 ? atoi(argv[4]) : 6000;
     int cmd_port = argc > 5 ? atoi(argv[5]) : 6002;
+    int web_port = argc > 6 ? atoi(argv[6]) : 8081;
 
     signal(SIGINT, on_signal);
     signal(SIGTERM, on_signal);
@@ -398,6 +401,9 @@ int main(int argc, char **argv)
     if (loaded >= 0) note("Taught map loaded: %d motion baselines from %s", loaded, teach_save_path());
     else note("No taught map yet (%s): baselines will come from the first cycles", teach_save_path());
     note("Teach commands: echo start > /dev/interceptor/teach, or UDP :%d", cmd_port);
+    char web_msg[120];
+    httpd_start(web_port, web_msg, sizeof web_msg);
+    note("%s", web_msg);
 
     long long last_live_ms = 0;
     char buf[BUF_SIZE + 1];
