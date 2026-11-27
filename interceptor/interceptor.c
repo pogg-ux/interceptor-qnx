@@ -1,15 +1,19 @@
 /*
- * Interceptor v0 - plain TCP passthrough for QNX 8.0.
+ * Interceptor v1 - TCP passthrough + Modbus copy-side parser for QNX 8.0.
  *
  * The PLC connects here (listen port, default 5020). For each PLC connection
  * the Interceptor opens its own connection to the field side (the simulator,
  * default 192.168.122.1:5021) and copies bytes both ways, unchanged.
- * It never creates, changes or drops traffic. v0 only counts what passes.
+ * It never creates, changes or drops traffic.
  *
- * Build (in WSL, after: source ~/qnx800/qnxsdp-env.sh):
- *   qcc -Vgcc_ntox86_64 -O2 -Wall interceptor.c -o interceptor -lsocket
- * Run (on QNX):
- *   ./interceptor [listen_port] [field_host] [field_port]
+ * AFTER each chunk is forwarded, a copy goes to the Modbus parser, which keeps
+ * a live table of every input and output:
+ *   - prints each digital change (inputs and outputs) as it happens
+ *   - writes the whole table to /tmp/interceptor_live 4 times a second
+ *     (cat /tmp/interceptor_live on QNX; becomes /dev/interceptor/live later)
+ *
+ * Build (in WSL):  bash deploy.sh
+ * Run (on QNX):    ./interceptor [listen_port] [field_host] [field_port]
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -24,6 +28,9 @@
 #include <netinet/tcp.h>
 #include <sys/socket.h>
 
+#include "modbus.h"
+#include "io_map.h"
+
 #define MAX_PAIRS 8
 #define BUF_SIZE  4096
 
@@ -36,6 +43,9 @@ struct pair {
 
 static struct pair pairs[MAX_PAIRS];
 static volatile sig_atomic_t running = 1;
+static struct mb_state mb;
+
+#define LIVE_PATH "/tmp/interceptor_live"
 
 static void on_signal(int s) { (void)s; running = 0; }
 
@@ -46,6 +56,61 @@ static void stamp(void)
     struct tm tm;
     localtime_r(&ts.tv_sec, &tm);
     printf("%02d:%02d:%02d.%03ld ", tm.tm_hour, tm.tm_min, tm.tm_sec, ts.tv_nsec / 1000000);
+}
+
+static const char *point_name(enum mb_table t, int i)
+{
+    static char tmp[16];
+    switch (t) {
+    case MB_DI:   if (i < N_OF(DI_NAMES))   return DI_NAMES[i];   break;
+    case MB_COIL: if (i < N_OF(COIL_NAMES)) return COIL_NAMES[i]; break;
+    case MB_IR:   if (i < N_OF(IR_NAMES))   return IR_NAMES[i];   break;
+    case MB_HR:   if (i < N_OF(HR_NAMES))   return HR_NAMES[i];   break;
+    default: break;
+    }
+    snprintf(tmp, sizeof tmp, "?%d", i);
+    return tmp;
+}
+
+static void on_change(enum mb_table t, int i, int old_v, int new_v)
+{
+    static const char *kind[] = { "IN ", "OUT", "AI ", "AO " };
+    stamp();
+    if (old_v < 0)
+        printf("%s %-16s = %d\n", kind[t], point_name(t, i), new_v);
+    else if (t == MB_HR)
+        printf("%s %-16s %d -> %d\n", kind[t], point_name(t, i), old_v, new_v);
+    else
+        printf("%s %-16s %s\n", kind[t], point_name(t, i), new_v ? "ON" : "off");
+}
+
+/* Write the whole live table to a temp file, then rename (readers never see half a table). */
+static void write_live(void)
+{
+    FILE *f = fopen(LIVE_PATH ".tmp", "w");
+    if (!f) return;
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    fprintf(f, "Interceptor live I/O   frames %lu req / %lu rsp   exceptions %lu   bad %lu\n",
+            mb.frames_req, mb.frames_rsp, mb.exceptions, mb.bad_frames);
+    static const struct { enum mb_table t; int n; const char *title; } sec[] = {
+        { MB_DI, 0, "INPUTS (PLC reads)" }, { MB_COIL, 0, "OUTPUTS (PLC writes)" },
+        { MB_IR, 0, "ANALOG IN" },          { MB_HR, 0, "ANALOG OUT" },
+    };
+    int counts[] = { N_OF(DI_NAMES), N_OF(COIL_NAMES), N_OF(IR_NAMES), N_OF(HR_NAMES) };
+    for (int k = 0; k < 4; k++) {
+        enum mb_table t = sec[k].t;
+        fprintf(f, "\n%s\n", sec[k].title);
+        for (int i = 0; i < counts[k]; i++) {
+            if (!mb.known[t][i]) { fprintf(f, "  %-20s   -\n", point_name(t, i)); continue; }
+            if (t == MB_DI || t == MB_COIL)
+                fprintf(f, "  %-20s %s\n", point_name(t, i), mb.value[t][i] ? "ON" : " .");
+            else
+                fprintf(f, "  %-20s %6d\n", point_name(t, i), mb.value[t][i]);
+        }
+    }
+    fclose(f);
+    rename(LIVE_PATH ".tmp", LIVE_PATH);
 }
 
 static void set_nodelay(int fd)
@@ -99,6 +164,7 @@ int main(int argc, char **argv)
     signal(SIGTERM, on_signal);
     signal(SIGPIPE, SIG_IGN);
     for (int i = 0; i < MAX_PAIRS; i++) pairs[i].plc = pairs[i].field = -1;
+    mb_init(&mb, on_change);
 
     int ls = socket(AF_INET, SOCK_STREAM, 0);
     int one = 1;
@@ -113,11 +179,12 @@ int main(int argc, char **argv)
     }
 
     stamp();
-    printf("Interceptor v0 up. PLC side :%d  ->  field side %s:%d (passthrough, read-only)\n",
+    printf("Interceptor v1 up. PLC side :%d  ->  field side %s:%d (passthrough, read-only)\n",
            listen_port, field_host, field_port);
     fflush(stdout);
 
     time_t last_report = time(NULL);
+    long long last_live_ms = 0;
     char buf[BUF_SIZE];
 
     while (running) {
@@ -131,7 +198,7 @@ int main(int argc, char **argv)
             pf[n].fd = pairs[i].field; pf[n].events = POLLIN; map[n++] = i;
         }
 
-        int r = poll(pf, n, 1000);
+        int r = poll(pf, n, 250);
         if (r < 0) { if (errno == EINTR) continue; perror("poll"); break; }
 
         for (int k = 0; k < n && r > 0; k++) {
@@ -155,6 +222,7 @@ int main(int argc, char **argv)
                 memset(&pairs[slot], 0, sizeof pairs[slot]);
                 pairs[slot].plc = c;
                 pairs[slot].field = f;
+                mb_reset_streams(&mb);
                 stamp();
                 printf("link %d open: PLC <-> Interceptor <-> field\n", slot);
                 fflush(stdout);
@@ -168,12 +236,19 @@ int main(int argc, char **argv)
             ssize_t got = read(src, buf, sizeof buf);
             if (got <= 0) { close_pair(i, from_plc ? "PLC hung up" : "field hung up"); continue; }
             if (write_all(dst, buf, got) < 0) { close_pair(i, "write failed"); continue; }
-            if (from_plc) { pairs[i].to_field += got; pairs[i].req++; }
-            else          { pairs[i].to_plc   += got; pairs[i].rsp++; }
+            /* Forwarded. Now read the copy. */
+            if (from_plc) { pairs[i].to_field += got; pairs[i].req++; mb_feed_request(&mb, (uint8_t *)buf, got); }
+            else          { pairs[i].to_plc   += got; pairs[i].rsp++; mb_feed_response(&mb, (uint8_t *)buf, got); }
         }
 
+        struct timespec mono;
+        clock_gettime(CLOCK_MONOTONIC, &mono);
+        long long now_ms = mono.tv_sec * 1000LL + mono.tv_nsec / 1000000;
+        if (now_ms - last_live_ms >= 250) { last_live_ms = now_ms; write_live(); }
+        fflush(stdout);
+
         time_t now = time(NULL);
-        if (now - last_report >= 5) {
+        if (now - last_report >= 30) {
             last_report = now;
             for (int i = 0; i < MAX_PAIRS; i++) {
                 if (pairs[i].plc < 0) continue;
@@ -187,6 +262,6 @@ int main(int argc, char **argv)
 
     for (int i = 0; i < MAX_PAIRS; i++) if (pairs[i].plc >= 0) close_pair(i, "shutdown");
     close(ls);
-    stamp(); printf("Interceptor v0 stopped\n");
+    stamp(); printf("Interceptor stopped\n");
     return 0;
 }
